@@ -109,8 +109,10 @@ export default function SettingsPage() {
         <CardHeader>
           <CardTitle>Deriv / MT5</CardTitle>
           <CardDescription>
-            Create a token at api.deriv.com with Read, Trade, and Payments (for
-            transfers). We never show the full token again after save.
+            Register a legacy app at api.deriv.com (not the new Native PAT
+            portal). Create the user token at app.deriv.com → Account → API
+            token with Read, Trade, and Payments. We never show the full token
+            again after save.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">

@@ -276,9 +276,13 @@ export class DerivService {
       ) {
         throw err;
       }
-      throw new BadRequestException(
-        err instanceof Error ? err.message : 'Deriv request failed',
-      );
+      const msg = err instanceof Error ? err.message : 'Deriv request failed';
+      if (/app_id is invalid/i.test(msg)) {
+        throw new BadRequestException(
+          `Deriv rejected App ID ${appId}. Solo uses the legacy WebSocket (authorize + mt5_login_list), not the new developers.deriv.com PAT API. Register a web/legacy app at https://api.deriv.com, finish the partner profile, put that numeric App ID on Render solo-api as DERIV_APP_ID, then create a token at https://app.deriv.com/account/api-token (Read, Trade, Payments). A Native PAT from developers.deriv.com will not work here.`,
+        );
+      }
+      throw new BadRequestException(msg);
     } finally {
       client.close();
     }
@@ -293,10 +297,10 @@ export class DerivService {
       config?.derivAppId?.trim() ||
       this.config.get<string>('DERIV_APP_ID')?.trim() ||
       '';
-    const appId = (rawAppId.match(/\d+/) || [])[0] || '';
+    const appId = /^\d+$/.test(rawAppId) ? rawAppId : '';
     if (!appId) {
       throw new BadRequestException(
-        'Set DERIV_APP_ID on solo-api to the numeric App ID from api.deriv.com → Apps (not an API token).',
+        'Set DERIV_APP_ID on solo-api to digits only from https://api.deriv.com → Applications (not a PAT/token, not developers.deriv.com).',
       );
     }
     const base =
