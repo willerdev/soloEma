@@ -18,6 +18,9 @@ import { FxModule } from './fx/fx.module';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { SoloPlatformModule } from './platform/solo-platform.module';
 import { HealthController } from './health/health.controller';
+import { markSoloApp } from './common/app-variant';
+
+markSoloApp();
 
 /**
  * Trade Guard Solo — wallet, Smart Invest, contract, payouts.
