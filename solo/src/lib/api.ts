@@ -139,10 +139,13 @@ class ApiClient {
         if (text) error = JSON.parse(text) as { message?: unknown };
       } catch {
         throw new Error(
-          text.slice(0, 120) || "Request failed — invalid server response",
+          text.slice(0, 180).trim() ||
+            `Request failed (HTTP ${res.status}). Check API_URL on solo-web and solo-api logs.`,
         );
       }
-      throw new Error(apiErrorMessage(error, res.statusText));
+      throw new Error(
+        apiErrorMessage(error, res.statusText || `HTTP ${res.status}`),
+      );
     }
 
     try {

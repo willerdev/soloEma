@@ -3,9 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 function backendOrigin(): string {
   const raw =
     process.env.API_URL ||
-    process.env.NEXT_PUBLIC_API_URL?.replace(/\/api\/v1\/?$/, "") ||
+    process.env.NEXT_PUBLIC_API_URL ||
     "http://localhost:4001";
-  return raw.replace(/\/$/, "");
+  return raw.replace(/\/$/, "").replace(/\/api\/v1$/i, "");
 }
 
 async function proxyRequest(req: NextRequest, path: string[]) {
