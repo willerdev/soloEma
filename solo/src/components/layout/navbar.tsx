@@ -25,6 +25,7 @@ import {
   X,
   ShieldCheck,
   Clock,
+  LineChart,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth";
@@ -95,6 +96,13 @@ const NAV_GROUPS: NavGroup[] = [
         shortLabel: "Chain",
         icon: Blocks,
         keywords: "chain on-chain",
+      },
+      {
+        href: "/deriv",
+        label: "Deriv",
+        shortLabel: "Deriv",
+        icon: LineChart,
+        keywords: "mt5 token trades transfer",
       },
     ],
   },

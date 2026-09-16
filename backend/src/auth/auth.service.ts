@@ -562,9 +562,10 @@ export class AuthService {
   }
 
   private sanitizeUser(user: Record<string, unknown>) {
-    const { passwordHash, emailVerifyToken, ...safe } = user;
+    const { passwordHash, emailVerifyToken, derivApiTokenEnc, ...safe } = user;
     void passwordHash;
     void emailVerifyToken;
+    void derivApiTokenEnc;
     return {
       ...safe,
       adminPermissions: resolveAdminPermissions({
