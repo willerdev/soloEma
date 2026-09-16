@@ -67,25 +67,43 @@ export class DerivService {
       throw new BadRequestException('That token looks too short.');
     }
 
-    const auth = await this.withSession(trimmed, (client) =>
-      client.request<{
-        authorize?: { loginid?: string; email?: string; balance?: number };
-      }>({ authorize: trimmed }),
-    );
+    try {
+      const auth = await this.withSession(trimmed, (client) =>
+        client.request<{
+          authorize?: { loginid?: string; email?: string; balance?: number };
+        }>({ authorize: trimmed }),
+      );
 
-    const enc = encryptCredential(trimmed, this.cryptoSecret());
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: { derivApiTokenEnc: enc, derivConnectedAt: new Date() },
-    });
+      const enc = encryptCredential(trimmed, this.cryptoSecret());
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { derivApiTokenEnc: enc, derivConnectedAt: new Date() },
+      });
 
-    this.logger.log(`Deriv token saved for user ${userId}`);
-    return {
-      connected: true,
-      connectedAt: new Date().toISOString(),
-      tokenMasked: maskToken(trimmed),
-      loginid: auth.authorize?.loginid ?? null,
-    };
+      this.logger.log(`Deriv token saved for user ${userId}`);
+      return {
+        connected: true,
+        connectedAt: new Date().toISOString(),
+        tokenMasked: maskToken(trimmed),
+        loginid: auth.authorize?.loginid ?? null,
+      };
+    } catch (err) {
+      if (
+        err instanceof BadRequestException ||
+        err instanceof ForbiddenException ||
+        err instanceof NotFoundException
+      ) {
+        throw err;
+      }
+      const msg = err instanceof Error ? err.message : 'Could not save Deriv token';
+      this.logger.warn(`Deriv saveToken failed: ${msg}`);
+      if (/derivApiTokenEnc|Unknown argument|column/i.test(msg)) {
+        throw new BadRequestException(
+          'Database is missing Deriv columns. Redeploy solo-api so prisma db push runs.',
+        );
+      }
+      throw new BadRequestException(msg);
+    }
   }
 
   async disconnect(userId: string) {
@@ -236,9 +254,28 @@ export class DerivService {
     fn: (client: DerivWsClient) => Promise<T>,
   ): Promise<T> {
     const { endpoint } = await this.connectionSettings();
-    const client = await DerivWsClient.connect(endpoint);
+    let client: DerivWsClient;
+    try {
+      client = await DerivWsClient.connect(endpoint);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Deriv connection failed';
+      throw new BadRequestException(
+        `Could not reach Deriv (${msg}). Check DERIV_APP_ID and network.`,
+      );
+    }
     try {
       return await fn(client);
+    } catch (err) {
+      if (
+        err instanceof BadRequestException ||
+        err instanceof ForbiddenException ||
+        err instanceof NotFoundException
+      ) {
+        throw err;
+      }
+      throw new BadRequestException(
+        err instanceof Error ? err.message : 'Deriv request failed',
+      );
     } finally {
       client.close();
     }
@@ -252,12 +289,7 @@ export class DerivService {
     const appId =
       config?.derivAppId?.trim() ||
       this.config.get<string>('DERIV_APP_ID')?.trim() ||
-      '';
-    if (!appId) {
-      throw new BadRequestException(
-        'Deriv App ID is not configured. Set DERIV_APP_ID on solo-api.',
-      );
-    }
+      '1089';
     const base =
       config?.derivEndpoint?.trim() ||
       this.config.get<string>('DERIV_ENDPOINT')?.trim() ||

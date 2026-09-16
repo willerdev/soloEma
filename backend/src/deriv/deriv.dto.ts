@@ -3,7 +3,7 @@ import { IsNotEmpty, IsNumber, IsString, MaxLength, Min } from 'class-validator'
 export class SaveDerivTokenDto {
   @IsString()
   @IsNotEmpty()
-  @MaxLength(128)
+  @MaxLength(512)
   token: string;
 }
 

@@ -1,5 +1,8 @@
 import WebSocket from 'ws';
 
+const WsCtor =
+  (WebSocket as unknown as { default?: typeof WebSocket }).default ?? WebSocket;
+
 type DerivMsg = {
   msg_type?: string;
   req_id?: number;
@@ -15,7 +18,7 @@ export class DerivWsClient {
 
   static connect(endpoint: string): Promise<DerivWsClient> {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(endpoint);
+      const ws = new WsCtor(endpoint);
       const timer = setTimeout(() => {
         ws.terminate();
         reject(new Error('Deriv WebSocket timed out'));
