@@ -373,7 +373,7 @@ export function InvestHub() {
         </div>
         <motion.div
           {...fadeUp}
-          className="relative overflow-hidden rounded-2xl border border-indigo-500/30 bg-gradient-to-br from-indigo-950/80 via-[#0f1419] to-cyan-950/40 p-6"
+          className="relative overflow-hidden rounded-2xl border border-cyan-400/25 bg-gradient-to-br from-navy via-background to-cyan/10 p-6"
         >
           <div className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-indigo-500/20 blur-3xl" />
           <div className="pointer-events-none absolute -bottom-20 -left-10 h-40 w-40 rounded-full bg-cyan-500/15 blur-3xl" />

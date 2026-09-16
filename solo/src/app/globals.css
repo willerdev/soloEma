@@ -1,13 +1,15 @@
 @import "tailwindcss";
 
 @theme inline {
-  --color-background: #121a2e;
+  --color-background: #07111F;
   --color-foreground: #F8FAFC;
   --color-muted: #94A3B8;
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-surface: rgba(22, 30, 48, 0.95);
+  --color-border: #1E3A5F;
+  --color-surface: #0D1B2A;
+  --color-navy: #102A43;
   --color-primary: #2563EB;
-  --color-success: #22C55E;
+  --color-cyan: #22D3EE;
+  --color-success: #10B981;
   --color-danger: #EF4444;
   --color-rank-gold: #FBBF24;
   --font-sans: var(--font-geist-sans);
@@ -70,7 +72,7 @@ body {
 }
 
 .modal-panel {
-  background: #1a2438 !important;
+  background: #0D1B2A !important;
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
 }
@@ -85,8 +87,8 @@ html.light .modal-panel {
   --mt5-red: #ff5252;
   --mt5-text: var(--color-foreground);
   --mt5-muted: var(--color-muted);
-  --mt5-bg: #121a2e;
-  --mt5-surface: #1a2438;
+  --mt5-bg: #07111F;
+  --mt5-surface: #0D1B2A;
   --mt5-divider: var(--color-border);
   --mt5-row-hover: rgba(255, 255, 255, 0.05);
 }
@@ -102,8 +104,8 @@ html.light .mt5-shell {
 
 /* Floating mobile bottom nav */
 .mobile-nav-dock {
-  --nav-dock-bg: #1a2438;
-  --nav-dock-border: rgba(255, 255, 255, 0.08);
+  --nav-dock-bg: #0D1B2A;
+  --nav-dock-border: #1E3A5F;
   --nav-dock-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
   --nav-dock-inactive: #94a3b8;
 }
@@ -130,7 +132,7 @@ html.light .mobile-nav-dock {
 }
 
 .text-gradient {
-  background: linear-gradient(135deg, #2563EB 0%, #60A5FA 50%, #FBBF24 100%);
+  background: linear-gradient(135deg, #2563EB 0%, #22D3EE 50%, #10B981 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
