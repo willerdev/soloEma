@@ -16,9 +16,17 @@ export class DerivWsClient {
     private nextId = 1,
   ) {}
 
-  static connect(endpoint: string): Promise<DerivWsClient> {
+  static connect(
+    endpoint: string,
+    options?: { origin?: string },
+  ): Promise<DerivWsClient> {
     return new Promise((resolve, reject) => {
-      const ws = new WsCtor(endpoint);
+      const headers: Record<string, string> = {};
+      const origin = options?.origin?.replace(/\/$/, '');
+      const ws = new WsCtor(endpoint, {
+        origin,
+        headers,
+      });
       const timer = setTimeout(() => {
         ws.terminate();
         reject(new Error('Deriv WebSocket timed out'));

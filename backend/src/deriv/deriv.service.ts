@@ -253,14 +253,17 @@ export class DerivService {
     _token: string,
     fn: (client: DerivWsClient) => Promise<T>,
   ): Promise<T> {
-    const { endpoint } = await this.connectionSettings();
+    const { endpoint, origin, appId } = await this.connectionSettings();
     let client: DerivWsClient;
     try {
-      client = await DerivWsClient.connect(endpoint);
+      client = await DerivWsClient.connect(endpoint, { origin });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Deriv connection failed';
+      const unauthorized = /401|unauthorized/i.test(msg);
       throw new BadRequestException(
-        `Could not reach Deriv (${msg}). Check DERIV_APP_ID and network.`,
+        unauthorized
+          ? `Deriv rejected the App ID (${appId}). On Render solo-api set DERIV_APP_ID to the numeric App ID from api.deriv.com (Apps), complete the Deriv partner profile, and match Website URL to ${origin || 'your solo-web origin'}. Do not paste an API token into DERIV_APP_ID.`
+          : `Could not reach Deriv (${msg}).`,
       );
     }
     try {
@@ -286,10 +289,16 @@ export class DerivService {
       where: { id: 'default' },
       select: { derivAppId: true, derivEndpoint: true },
     });
-    const appId =
+    const rawAppId =
       config?.derivAppId?.trim() ||
       this.config.get<string>('DERIV_APP_ID')?.trim() ||
-      '1089';
+      '';
+    const appId = (rawAppId.match(/\d+/) || [])[0] || '';
+    if (!appId) {
+      throw new BadRequestException(
+        'Set DERIV_APP_ID on solo-api to the numeric App ID from api.deriv.com → Apps (not an API token).',
+      );
+    }
     const base =
       config?.derivEndpoint?.trim() ||
       this.config.get<string>('DERIV_ENDPOINT')?.trim() ||
@@ -297,6 +306,12 @@ export class DerivService {
     const endpoint = base.includes('app_id=')
       ? base
       : `${base.replace(/\/$/, '')}?app_id=${encodeURIComponent(appId)}`;
-    return { appId, endpoint };
+    const originRaw =
+      this.config.get<string>('PUBLIC_APP_URL')?.split(',')[0]?.trim() ||
+      this.config.get<string>('FRONTEND_URL')?.split(',')[0]?.trim() ||
+      this.config.get<string>('DERIV_ORIGIN')?.trim() ||
+      '';
+    const origin = originRaw.replace(/\/$/, '');
+    return { appId, endpoint, origin };
   }
 }
