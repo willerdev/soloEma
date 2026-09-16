@@ -49,7 +49,9 @@ function platformName(
   const id = login.trim();
   if (/^MTR/i.test(id) || /^MTD/i.test(id)) return 'mt5';
   if (/^CTR/i.test(id)) return 'ctrader';
-  if (/^DOT/i.test(id) || /^DOR/i.test(id)) return 'options';
+  if (/^DOT/i.test(id) || /^DOR/i.test(id) || /^ROT/i.test(id) || /^ROR/i.test(id)) {
+    return 'options';
+  }
   return null;
 }
 
