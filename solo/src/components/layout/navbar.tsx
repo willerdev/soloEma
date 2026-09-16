@@ -28,7 +28,6 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth";
-import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/layout/logo";
 import { UserAvatar } from "@/components/layout/user-avatar";
 import { PlatformNotificationsBell } from "@/components/layout/platform-notifications-bell";
