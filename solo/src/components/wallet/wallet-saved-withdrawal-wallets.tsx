@@ -31,33 +31,40 @@ export function WalletAddWithdrawalWalletModal({
   open,
   onClose,
   onSaved,
+  networks,
 }: {
   open: boolean;
   onClose: () => void;
   onSaved: () => void;
+  /** Limit selectable networks (auto-withdraw uses TRC20 only). */
+  networks?: readonly WithdrawalWalletNetwork[];
 }) {
+  const networkOptions = networks?.length ? networks : NETWORKS;
   const [step, setStep] = useState<"form" | "code">("form");
   const [label, setLabel] = useState("");
-  const [network, setNetwork] = useState<WithdrawalWalletNetwork>("TRC20");
+  const [network, setNetwork] = useState<WithdrawalWalletNetwork>(
+    networkOptions[0] ?? "TRC20",
+  );
   const [address, setAddress] = useState("");
   const [sessionId, setSessionId] = useState("");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const lockNetwork = networkOptions.length === 1;
 
   useEffect(() => {
     if (!open) {
       setStep("form");
       setLabel("");
-      setNetwork("TRC20");
+      setNetwork(networks?.[0] ?? "TRC20");
       setAddress("");
       setSessionId("");
       setEmail("");
       setCode("");
       setError("");
     }
-  }, [open]);
+  }, [open, networks]);
 
   async function requestCode() {
     setError("");
@@ -131,23 +138,33 @@ export function WalletAddWithdrawalWalletModal({
               </div>
               <div>
                 <label className="mb-1 block text-xs text-gray-400">Network</label>
-                <select
-                  value={network}
-                  onChange={(e) =>
-                    setNetwork(e.target.value as WithdrawalWalletNetwork)
-                  }
-                  className="w-full rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm text-white"
-                >
-                  {NETWORKS.map((n) => (
-                    <option key={n} value={n}>
-                      {n === "MOMO_MTN"
-                        ? "MTN MoMo"
-                        : n === "MOMO_AIRTEL"
-                          ? "Airtel Money"
-                          : n}
-                    </option>
-                  ))}
-                </select>
+                {lockNetwork ? (
+                  <p className="rounded-md border border-border bg-navy px-3 py-2 text-sm text-foreground">
+                    {network === "MOMO_MTN"
+                      ? "MTN MoMo"
+                      : network === "MOMO_AIRTEL"
+                        ? "Airtel Money"
+                        : network}
+                  </p>
+                ) : (
+                  <select
+                    value={network}
+                    onChange={(e) =>
+                      setNetwork(e.target.value as WithdrawalWalletNetwork)
+                    }
+                    className="w-full rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm text-white"
+                  >
+                    {networkOptions.map((n) => (
+                      <option key={n} value={n}>
+                        {n === "MOMO_MTN"
+                          ? "MTN MoMo"
+                          : n === "MOMO_AIRTEL"
+                            ? "Airtel Money"
+                            : n}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <p className="mt-1 text-xs text-gray-500">
                   {isMomoNetwork(network)
                     ? "MoMo withdrawals send to your verified phone number via Flutterwave."
