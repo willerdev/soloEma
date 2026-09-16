@@ -109,10 +109,10 @@ export default function SettingsPage() {
         <CardHeader>
           <CardTitle>Deriv / MT5</CardTitle>
           <CardDescription>
-            Register a legacy app at api.deriv.com (not the new Native PAT
-            portal). Create the user token at app.deriv.com → Account → API
-            token with Read, Trade, and Payments. We never show the full token
-            again after save.
+            On developers.deriv.com create a Native PAT app, put that App ID
+            on solo-api as DERIV_APP_ID, then paste a PAT with Trade, Payments,
+            and Account management. We never show the full token again after
+            save.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">

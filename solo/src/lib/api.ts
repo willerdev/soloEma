@@ -327,6 +327,8 @@ class ApiClient {
     accounts: () =>
       this.request<{
         wallet: DerivAccount | null;
+        wallets?: DerivAccount[];
+        options?: DerivAccount[];
         mt5: DerivAccount[];
       }>("/deriv/accounts"),
     trades: () =>
@@ -1741,7 +1743,7 @@ export type LoginResponse = LoginStartResponse | LoginCompleteResponse;
 
 export interface DerivAccount {
   login: string;
-  kind: "deriv" | "mt5";
+  kind: "deriv" | "mt5" | "options";
   accountType: string | null;
   currency: string;
   balance: number;

@@ -28,6 +28,7 @@ export default function DerivPage() {
   const [statement, setStatement] = useState<Record<string, unknown>[]>([]);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [mt5Login, setMt5Login] = useState("");
   const [amount, setAmount] = useState("");
   const [currency, setCurrency] = useState("USD");
   const [error, setError] = useState("");
@@ -39,8 +40,18 @@ export default function DerivPage() {
     const list: DerivAccount[] = [];
     if (wallet?.login) list.push(wallet);
     list.push(...mt5.filter((a) => a.login));
+    const extra = mt5Login.trim();
+    if (extra && !list.some((a) => a.login === extra)) {
+      list.push({
+        login: extra,
+        kind: "mt5",
+        accountType: "mt5",
+        currency,
+        balance: 0,
+      });
+    }
     return list;
-  }, [wallet, mt5]);
+  }, [wallet, mt5, mt5Login, currency]);
 
   const refresh = useCallback(async () => {
     setError("");
@@ -58,7 +69,11 @@ export default function DerivPage() {
       api.deriv.trades(),
     ]);
     setWallet(acc.wallet);
-    setMt5(acc.mt5);
+    setMt5([
+      ...(acc.wallets ?? []).filter((a) => a.login !== acc.wallet?.login),
+      ...(acc.options ?? []),
+      ...acc.mt5,
+    ]);
     setOpen(trades.open);
     setStatement(trades.statement);
     if (acc.wallet?.currency) setCurrency(acc.wallet.currency);
@@ -115,7 +130,9 @@ export default function DerivPage() {
       <div>
         <h1 className="text-2xl font-bold text-white">Deriv</h1>
         <p className="mt-1 text-sm text-muted">
-          MT5 balances, transfers, and open Deriv contracts for the token in Settings.
+          Wallets, Options accounts, transfers, and open Options contracts for
+          the PAT in Settings. MT5 logins (MTR…) can be used as a transfer
+          destination; Deriv does not list MT5 balances on the PAT API.
         </p>
       </div>
 
@@ -147,7 +164,12 @@ export default function DerivPage() {
               <Card key={`${acc.kind}-${acc.login}`}>
                 <CardHeader className="pb-2">
                   <CardTitle className="text-base">
-                    {acc.kind === "mt5" ? "MT5" : "Deriv"} {acc.login}
+                    {acc.kind === "mt5"
+                      ? "MT5"
+                      : acc.kind === "options"
+                        ? "Options"
+                        : "Wallet"}{" "}
+                    {acc.login}
                   </CardTitle>
                   <CardDescription>{acc.accountType ?? acc.kind}</CardDescription>
                 </CardHeader>
@@ -164,7 +186,7 @@ export default function DerivPage() {
             <CardHeader>
               <CardTitle>Transfer</CardTitle>
               <CardDescription>
-                Move funds between your own Deriv wallet and MT5 logins.
+                Move funds wallet↔wallet or wallet↔Options/MT5 (MTR…).
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -218,6 +240,14 @@ export default function DerivPage() {
                     value={currency}
                     onChange={(e) => setCurrency(e.target.value.toUpperCase())}
                     required
+                  />
+                </div>
+                <div className="space-y-1 sm:col-span-2">
+                  <Label>MT5 login (optional)</Label>
+                  <Input
+                    placeholder="MTR…"
+                    value={mt5Login}
+                    onChange={(e) => setMt5Login(e.target.value)}
                   />
                 </div>
                 <Button className="sm:col-span-2" type="submit" disabled={busy}>

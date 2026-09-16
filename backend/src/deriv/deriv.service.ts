@@ -5,6 +5,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { resolveJwtSecret } from '../config/jwt-secret';
@@ -12,9 +13,12 @@ import {
   decryptCredential,
   encryptCredential,
 } from '../common/credential-crypto.util';
+import { DerivPatClient } from './deriv-pat.client';
 import { DerivWsClient } from './deriv-ws.client';
 
 const transferBuckets = new Map<string, { count: number; resetAt: number }>();
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function assertActionRateLimit(userId: string) {
   const now = Date.now();
@@ -34,6 +38,41 @@ function maskToken(token: string): string {
   if (t.length < 8) return '••••';
   return `${t.slice(0, 4)}••••${t.slice(-2)}`;
 }
+
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}
+
+function platformName(
+  login: string,
+): 'mt5' | 'ctrader' | 'options' | null {
+  const id = login.trim();
+  if (/^MTR/i.test(id) || /^MTD/i.test(id)) return 'mt5';
+  if (/^CTR/i.test(id)) return 'ctrader';
+  if (/^DOT/i.test(id) || /^DOR/i.test(id)) return 'options';
+  return null;
+}
+
+type WalletRow = {
+  wallet_id?: string;
+  type?: string;
+  balances?: Record<string, { balance?: string }>;
+};
+
+type OptionsAccountRow = {
+  account_id?: string;
+  balance?: number;
+  currency?: string;
+  account_type?: string;
+};
+
+export type DerivAccountView = {
+  login: string;
+  kind: 'deriv' | 'mt5' | 'options';
+  accountType: string | null;
+  currency: string;
+  balance: number;
+};
 
 @Injectable()
 export class DerivService {
@@ -68,11 +107,10 @@ export class DerivService {
     }
 
     try {
-      const auth = await this.withSession(trimmed, (client) =>
-        client.request<{
-          authorize?: { loginid?: string; email?: string; balance?: number };
-        }>({ authorize: trimmed }),
-      );
+      const client = await this.patClient(trimmed);
+      const [wallets, options] = await this.loadAccountLists(client);
+      const loginid =
+        options[0]?.account_id || wallets[0]?.wallet_id || null;
 
       const enc = encryptCredential(trimmed, this.cryptoSecret());
       await this.prisma.user.update({
@@ -80,12 +118,12 @@ export class DerivService {
         data: { derivApiTokenEnc: enc, derivConnectedAt: new Date() },
       });
 
-      this.logger.log(`Deriv token saved for user ${userId}`);
+      this.logger.log(`Deriv PAT saved for user ${userId}`);
       return {
         connected: true,
         connectedAt: new Date().toISOString(),
         tokenMasked: maskToken(trimmed),
-        loginid: auth.authorize?.loginid ?? null,
+        loginid,
       };
     } catch (err) {
       if (
@@ -115,69 +153,41 @@ export class DerivService {
   }
 
   async accounts(userId: string) {
-    return this.withUserToken(userId, async (client, token) => {
-      await client.request({ authorize: token });
-      const [balanceRes, mt5Res] = await Promise.all([
-        client.request<{
-          balance?: { balance?: number; currency?: string; loginid?: string };
-        }>({ balance: 1 }),
-        client.request<{
-          mt5_login_list?: Array<{
-            login?: string;
-            balance?: number;
-            currency?: string;
-            market_type?: string;
-            landing_company_short?: string;
-            account_type?: string;
-            display_balance?: string;
-          }>;
-        }>({ mt5_login_list: 1 }),
-      ]);
-
-      const wallet = balanceRes.balance;
-      const mt5 = (mt5Res.mt5_login_list ?? []).map((row) => ({
-        login: String(row.login ?? ''),
-        kind: 'mt5' as const,
-        accountType: row.account_type ?? row.market_type ?? null,
-        currency: row.currency ?? 'USD',
-        balance: Number(row.balance ?? 0),
-      }));
-
+    return this.withUserToken(userId, async (client) => {
+      const [wallets, options] = await this.loadAccountLists(client);
+      const walletViews = this.mapWallets(wallets);
+      const optionViews = this.mapOptions(options);
       return {
-        wallet: wallet
-          ? {
-              login: String(wallet.loginid ?? ''),
-              kind: 'deriv' as const,
-              accountType: 'wallet',
-              currency: wallet.currency ?? 'USD',
-              balance: Number(wallet.balance ?? 0),
-            }
-          : null,
-        mt5,
+        wallet: walletViews[0] ?? optionViews[0] ?? null,
+        wallets: walletViews,
+        options: optionViews,
+        mt5: [] as DerivAccountView[],
       };
     });
   }
 
   async trades(userId: string) {
-    return this.withUserToken(userId, async (client, token) => {
-      await client.request({ authorize: token });
-      const [portfolioRes, statementRes] = await Promise.all([
-        client.request<{
-          portfolio?: {
-            contracts?: Array<Record<string, unknown>>;
-          };
-        }>({ portfolio: 1 }),
-        client.request<{
-          statement?: {
-            transactions?: Array<Record<string, unknown>>;
-          };
-        }>({ statement: 1, limit: 25, offset: 0 }),
-      ]);
-
-      return {
-        open: portfolioRes.portfolio?.contracts ?? [],
-        statement: statementRes.statement?.transactions ?? [],
-      };
+    return this.withUserToken(userId, async (client) => {
+      const options = await this.listOptions(client);
+      const accountId = this.pickOptionsAccount(options);
+      if (!accountId) {
+        const statement = await this.legacyStatement(client);
+        return { open: [], statement };
+      }
+      return this.withOptionsSocket(client, accountId, async (ws) => {
+        const [portfolioRes, statementRes] = await Promise.all([
+          ws.request<{
+            portfolio?: { contracts?: Array<Record<string, unknown>> };
+          }>({ portfolio: 1 }),
+          ws.request<{
+            statement?: { transactions?: Array<Record<string, unknown>> };
+          }>({ statement: 1, limit: 25, offset: 0 }),
+        ]);
+        return {
+          open: portfolioRes.portfolio?.contracts ?? [],
+          statement: statementRes.statement?.transactions ?? [],
+        };
+      });
     });
   }
 
@@ -194,18 +204,53 @@ export class DerivService {
     if (input.accountFrom === input.accountTo) {
       throw new BadRequestException('Pick two different accounts.');
     }
-    return this.withUserToken(userId, async (client, token) => {
-      await client.request({ authorize: token });
-      const res = await client.request<{
-        transfer_between_accounts?: Record<string, unknown>;
-      }>({
-        transfer_between_accounts: 1,
-        account_from: input.accountFrom,
-        account_to: input.accountTo,
-        amount: input.amount,
-        currency: input.currency.toUpperCase(),
-      });
-      return res.transfer_between_accounts ?? { ok: true };
+    const amount = String(input.amount);
+    const currency = input.currency.toUpperCase();
+    const from = input.accountFrom.trim();
+    const to = input.accountTo.trim();
+
+    return this.withUserToken(userId, async (client) => {
+      if (isUuid(from) && isUuid(to)) {
+        return client.post('/wallet/v1/transfers', {
+          currency,
+          amount,
+          source_wallet_id: from,
+          destination_wallet_id: to,
+          request_id: randomUUID(),
+          description: 'soloEmma transfer',
+        });
+      }
+
+      const fromPlatform = platformName(from);
+      const toPlatform = platformName(to);
+      if (isUuid(from) && toPlatform) {
+        return client.post('/wallet/v1/transfers/platforms', {
+          wallet_id: from,
+          amount,
+          currency,
+          direction: 'from_wallet',
+          platform_name: toPlatform,
+          platform_account_id: to,
+          request_id: randomUUID(),
+          description: 'soloEmma transfer',
+        });
+      }
+      if (isUuid(to) && fromPlatform) {
+        return client.post('/wallet/v1/transfers/platforms', {
+          wallet_id: to,
+          amount,
+          currency,
+          direction: 'to_wallet',
+          platform_name: fromPlatform,
+          platform_account_id: from,
+          request_id: randomUUID(),
+          description: 'soloEmma transfer',
+        });
+      }
+
+      throw new BadRequestException(
+        'PAT transfers are wallet↔wallet or wallet↔platform (Options DOT… or MT5 MTR…). Transfer via a wallet.',
+      );
     });
   }
 
@@ -215,19 +260,160 @@ export class DerivService {
     if (!Number.isFinite(id) || id <= 0) {
       throw new BadRequestException('Invalid contract id.');
     }
-    return this.withUserToken(userId, async (client, token) => {
-      await client.request({ authorize: token });
-      const res = await client.request<{ sell?: Record<string, unknown> }>({
-        sell: id,
-        price: 0,
+    return this.withUserToken(userId, async (client) => {
+      const options = await this.listOptions(client);
+      const accountId = this.pickOptionsAccount(options);
+      if (!accountId) {
+        throw new BadRequestException(
+          'No Options account on this PAT. Close is only for Deriv Options contracts.',
+        );
+      }
+      return this.withOptionsSocket(client, accountId, async (ws) => {
+        const res = await ws.request<{ sell?: Record<string, unknown> }>({
+          sell: id,
+          price: 0,
+        });
+        return res.sell ?? { ok: true };
       });
-      return res.sell ?? { ok: true };
     });
+  }
+
+  private mapWallets(wallets: WalletRow[]): DerivAccountView[] {
+    const out: DerivAccountView[] = [];
+    for (const row of wallets) {
+      const login = String(row.wallet_id ?? '');
+      if (!login) continue;
+      const balances = row.balances ?? {};
+      const currencies = Object.keys(balances);
+      const currency =
+        (currencies.includes('USD') ? 'USD' : currencies[0]) || 'USD';
+      out.push({
+        login,
+        kind: 'deriv',
+        accountType: row.type ?? 'wallet',
+        currency,
+        balance: Number(balances[currency]?.balance ?? 0),
+      });
+    }
+    return out;
+  }
+
+  private mapOptions(options: OptionsAccountRow[]): DerivAccountView[] {
+    return options
+      .filter((row) => row.account_id)
+      .map((row) => ({
+        login: String(row.account_id),
+        kind: 'options' as const,
+        accountType: row.account_type ?? 'options',
+        currency: row.currency ?? 'USD',
+        balance: Number(row.balance ?? 0),
+      }));
+  }
+
+  private pickOptionsAccount(options: OptionsAccountRow[]): string | null {
+    const real = options.find(
+      (row) => row.account_type === 'real' && row.account_id,
+    );
+    const any = options.find((row) => row.account_id);
+    return real?.account_id || any?.account_id || null;
+  }
+
+  private async loadAccountLists(client: DerivPatClient) {
+    let wallets: WalletRow[] = [];
+    let options: OptionsAccountRow[] = [];
+    let lastErr: unknown;
+    try {
+      wallets = await this.listWallets(client);
+    } catch (err) {
+      lastErr = err;
+      this.logger.warn(
+        `Deriv wallets: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      options = await this.listOptions(client);
+    } catch (err) {
+      lastErr = err;
+      this.logger.warn(
+        `Deriv options accounts: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    if (wallets.length === 0 && options.length === 0) {
+      if (
+        lastErr instanceof BadRequestException ||
+        lastErr instanceof ForbiddenException
+      ) {
+        throw lastErr;
+      }
+      throw new BadRequestException(
+        'PAT connected, but Deriv returned no wallets or Options accounts. Add Trade and Payments on the token.',
+      );
+    }
+    return [wallets, options] as const;
+  }
+
+  private async listWallets(client: DerivPatClient): Promise<WalletRow[]> {
+    const res = await client.get<{ data?: WalletRow[] }>(
+      '/wallet/v1/wallets?conversion_currency=USD',
+    );
+    return Array.isArray(res.data) ? res.data : [];
+  }
+
+  private async listOptions(
+    client: DerivPatClient,
+  ): Promise<OptionsAccountRow[]> {
+    const res = await client.get<{ data?: OptionsAccountRow[] }>(
+      '/trading/v1/options/accounts',
+    );
+    return Array.isArray(res.data) ? res.data : [];
+  }
+
+  private async legacyStatement(
+    client: DerivPatClient,
+  ): Promise<Array<Record<string, unknown>>> {
+    try {
+      const res = await client.get<{
+        loginids?: Record<string, unknown>;
+      }>('/trading/v1/options/legacy/accounts');
+      const loginid = Object.keys(res.loginids ?? {})[0];
+      if (!loginid) return [];
+      const stmt = await client.get<{
+        data?: Array<Record<string, unknown>>;
+        transactions?: Array<Record<string, unknown>>;
+      }>(
+        `/trading/v1/options/legacy/statement?loginid=${encodeURIComponent(loginid)}&limit=25&offset=0`,
+      );
+      if (Array.isArray(stmt.data)) return stmt.data;
+      if (Array.isArray(stmt.transactions)) return stmt.transactions;
+      return [];
+    } catch {
+      return [];
+    }
+  }
+
+  private async withOptionsSocket<T>(
+    client: DerivPatClient,
+    accountId: string,
+    fn: (ws: DerivWsClient) => Promise<T>,
+  ): Promise<T> {
+    const otp = await client.post<{ data?: { url?: string } }>(
+      `/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
+    );
+    const url = otp.data?.url;
+    if (!url) {
+      throw new BadRequestException('Deriv did not return a WebSocket URL.');
+    }
+    const ws = await DerivWsClient.connect(url);
+    try {
+      return await fn(ws);
+    } finally {
+      ws.close();
+    }
   }
 
   private async withUserToken<T>(
     userId: string,
-    fn: (client: DerivWsClient, token: string) => Promise<T>,
+    fn: (client: DerivPatClient) => Promise<T>,
   ): Promise<T> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -246,46 +432,12 @@ export class DerivService {
         'Saved token could not be decrypted. Save it again in Settings.',
       );
     }
-    return this.withSession(token, (client) => fn(client, token));
+    return fn(await this.patClient(token));
   }
 
-  private async withSession<T>(
-    _token: string,
-    fn: (client: DerivWsClient) => Promise<T>,
-  ): Promise<T> {
-    const { endpoint, origin, appId } = await this.connectionSettings();
-    let client: DerivWsClient;
-    try {
-      client = await DerivWsClient.connect(endpoint, { origin });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Deriv connection failed';
-      const unauthorized = /401|unauthorized/i.test(msg);
-      throw new BadRequestException(
-        unauthorized
-          ? `Deriv rejected the App ID (${appId}). On Render solo-api set DERIV_APP_ID to the numeric App ID from api.deriv.com (Apps), complete the Deriv partner profile, and match Website URL to ${origin || 'your solo-web origin'}. Do not paste an API token into DERIV_APP_ID.`
-          : `Could not reach Deriv (${msg}).`,
-      );
-    }
-    try {
-      return await fn(client);
-    } catch (err) {
-      if (
-        err instanceof BadRequestException ||
-        err instanceof ForbiddenException ||
-        err instanceof NotFoundException
-      ) {
-        throw err;
-      }
-      const msg = err instanceof Error ? err.message : 'Deriv request failed';
-      if (/app_id is invalid/i.test(msg)) {
-        throw new BadRequestException(
-          `Deriv rejected App ID ${appId}. Solo uses the legacy WebSocket (authorize + mt5_login_list), not the new developers.deriv.com PAT API. Register a web/legacy app at https://api.deriv.com, finish the partner profile, put that numeric App ID on Render solo-api as DERIV_APP_ID, then create a token at https://app.deriv.com/account/api-token (Read, Trade, Payments). A Native PAT from developers.deriv.com will not work here.`,
-        );
-      }
-      throw new BadRequestException(msg);
-    } finally {
-      client.close();
-    }
+  private async patClient(token: string): Promise<DerivPatClient> {
+    const { appId, baseUrl } = await this.connectionSettings();
+    return new DerivPatClient(baseUrl, appId, token);
   }
 
   private async connectionSettings() {
@@ -297,25 +449,16 @@ export class DerivService {
       config?.derivAppId?.trim() ||
       this.config.get<string>('DERIV_APP_ID')?.trim() ||
       '';
-    const appId = /^\d+$/.test(rawAppId) ? rawAppId : '';
-    if (!appId) {
+    const appId = rawAppId.replace(/^["']|["']$/g, '');
+    if (!/^[A-Za-z0-9_-]{6,80}$/.test(appId) || appId.includes('.')) {
       throw new BadRequestException(
-        'Set DERIV_APP_ID on solo-api to digits only from https://api.deriv.com → Applications (not a PAT/token, not developers.deriv.com).',
+        'Set DERIV_APP_ID on solo-api to the PAT App ID from developers.deriv.com → Apps (the solo PAT app id, not an API token).',
       );
     }
-    const base =
-      config?.derivEndpoint?.trim() ||
-      this.config.get<string>('DERIV_ENDPOINT')?.trim() ||
-      'wss://ws.derivws.com/websockets/v3';
-    const endpoint = base.includes('app_id=')
-      ? base
-      : `${base.replace(/\/$/, '')}?app_id=${encodeURIComponent(appId)}`;
-    const originRaw =
-      this.config.get<string>('PUBLIC_APP_URL')?.split(',')[0]?.trim() ||
-      this.config.get<string>('FRONTEND_URL')?.split(',')[0]?.trim() ||
-      this.config.get<string>('DERIV_ORIGIN')?.trim() ||
-      '';
-    const origin = originRaw.replace(/\/$/, '');
-    return { appId, endpoint, origin };
+    const endpoint =
+      this.config.get<string>('DERIV_API_BASE')?.trim() ||
+      'https://api.derivws.com';
+    const baseUrl = endpoint.replace(/\/$/, '').replace(/^wss:/, 'https:');
+    return { appId, baseUrl };
   }
 }

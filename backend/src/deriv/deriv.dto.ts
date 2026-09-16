@@ -3,19 +3,19 @@ import { IsNotEmpty, IsNumber, IsString, MaxLength, Min } from 'class-validator'
 export class SaveDerivTokenDto {
   @IsString()
   @IsNotEmpty()
-  @MaxLength(512)
+  @MaxLength(2048)
   token: string;
 }
 
 export class DerivTransferDto {
   @IsString()
   @IsNotEmpty()
-  @MaxLength(32)
+  @MaxLength(80)
   accountFrom: string;
 
   @IsString()
   @IsNotEmpty()
-  @MaxLength(32)
+  @MaxLength(80)
   accountTo: string;
 
   @IsNumber()
