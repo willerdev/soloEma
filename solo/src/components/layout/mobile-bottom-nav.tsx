@@ -29,13 +29,18 @@ function NavTab({
       <span
         className={cn(
           "flex h-8 w-8 items-center justify-center rounded-full",
-          active && "bg-primary/15 text-primary",
+          active && "bg-primary/15 text-[var(--nav-dock-active)]",
           emphasize && !active && "text-primary",
         )}
       >
         <Icon className="h-5 w-5" strokeWidth={active ? 2.4 : 2} />
       </span>
-      <span className={cn("text-[10px] font-medium", active ? "text-white" : "text-gray-400")}>
+      <span
+        className={cn(
+          "text-[10px] font-medium",
+          active ? "text-[var(--nav-dock-active)]" : "text-[var(--nav-dock-inactive)]",
+        )}
+      >
         {label}
       </span>
     </>

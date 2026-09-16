@@ -108,6 +108,7 @@ html.light .mt5-shell {
   --nav-dock-border: #1E3A5F;
   --nav-dock-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
   --nav-dock-inactive: #94a3b8;
+  --nav-dock-active: #F8FAFC;
 }
 
 html.light .mobile-nav-dock {
@@ -115,6 +116,7 @@ html.light .mobile-nav-dock {
   --nav-dock-border: rgba(15, 23, 42, 0.08);
   --nav-dock-shadow: 0 8px 28px rgba(15, 23, 42, 0.12);
   --nav-dock-inactive: #64748b;
+  --nav-dock-active: #0F172A;
 }
 
 /* Desktop floating sidebar — expand main padding when open */
