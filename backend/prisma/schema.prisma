@@ -1,0 +1,2221 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PayoutMethod {
+  TRC20
+  MOBILE_MONEY
+}
+
+enum UserRole {
+  TRADER
+  MODERATOR
+  ADMIN
+}
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  PENDING_PAYMENT
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+enum AccountTransferStatus {
+  PENDING_USER
+  IN_REVIEW
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum RankTier {
+  BRONZE
+  SILVER
+  GOLD
+  DIAMOND
+  ELITE
+}
+
+enum TradeDirection {
+  BUY
+  SELL
+}
+
+enum SignalStatus {
+  PENDING
+  OPEN
+  WON
+  LOST
+  ARCHIVED
+  CANCELLED
+  REJECTED_DUPLICATE
+}
+
+enum PayoutStatus {
+  PENDING
+  APPROVED
+  PAID
+  REJECTED
+}
+
+enum PayoutSource {
+  WEEKLY
+  TP_REWARD
+  PROFIT_SHARE
+  DEPOSITOR
+}
+
+enum MomoP2pStatus {
+  INITIATED
+  UNDER_PROCESS
+  COMPLETED
+  CANCELLED
+}
+
+enum CashAgentStatus {
+  PENDING
+  ACTIVE
+  REJECTED
+  SUSPENDED
+}
+
+enum LoanTerm {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum LoanStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REPAID
+  DEFAULTED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  EXPIRED
+}
+
+enum ViolationType {
+  DUPLICATE_SIGNAL
+  DUPLICATE_TRADE
+  MULTIPLE_ACCOUNTS
+  IP_ABUSE
+  TRADE_MANIPULATION
+  SCREENSHOT_REUSE
+}
+
+enum SubscriptionPlan {
+  FREE
+  PREMIUM
+  PRO
+}
+
+enum WalletTxType {
+  TP_REWARD
+  DEPOSIT
+  PAYOUT
+  ADJUSTMENT
+  PROFIT_SHARE
+  REFERRAL_REWARD
+  INVESTOR_FEE
+  DEPOSITOR_DEPOSIT
+  DEPOSITOR_EARNING
+  DEPOSITOR_WITHDRAW
+  INVESTOR_EARNING
+  INVESTOR_ALLOCATE
+  INVESTOR_REDEEM
+  INVESTOR_REINVEST_FEE
+  SUBSCRIPTION
+  UNITRUST_ALLOCATE
+  UNITRUST_REDEEM
+  UNITRUST_EARNING
+  AIRFARMING_EARNING
+  AIRFARMING_FLOOR_CATCHUP
+  LOAN_DISBURSE
+  LOAN_REPAY
+  CHAIN_ALLOCATE
+  CHAIN_ENROLLMENT_FEE
+  CHAIN_EARNING
+  CHAIN_WITHDRAW
+  TRANSFER_OUT
+  TRANSFER_IN
+}
+
+enum SignalSource {
+  TRADER
+  SYSTEM
+  EXTERNAL
+}
+
+enum DepositorPlanStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum AirfarmingDropStatus {
+  SCHEDULED
+  PAID
+  MISSED
+}
+
+enum AirfarmingTransferDirection {
+  TO_AIRFARMING
+  TO_CASH
+}
+
+enum AirfarmingTransferReason {
+  USER_MANUAL
+  IDLE_PARK
+  DROP_PREP
+  POST_DROP_RETURN
+  SYSTEM
+}
+
+enum AirfarmingDropSource {
+  NATURAL
+  FLOOR_BOOST
+  WEEK_FLOOR_CATCHUP
+}
+
+enum AirfarmingEnrollmentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AirfarmingWithdrawPreference {
+  WEEKLY
+  MONTHLY
+  YEARLY
+}
+
+enum InvestorTradeStatus {
+  PENDING
+  OPEN
+  CLOSED
+  FAILED
+  SKIPPED
+}
+
+enum KycStatus {
+  NOT_STARTED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum KycDocumentType {
+  PASSPORT
+  NATIONAL_ID
+  DRIVERS_LICENSE
+}
+
+enum TpClaimStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum TpClaimType {
+  FULL_TP
+  RR_1_TO_1
+}
+
+enum CopyTradeStatus {
+  PENDING
+  OPEN
+  CLOSED
+  FAILED
+  SKIPPED
+}
+
+enum Mt5SyncLinkStatus {
+  OPEN
+  CLOSED
+  FAILED
+}
+
+enum Mt5LinkRequestStatus {
+  PENDING
+  FAILED
+  LINKED
+}
+
+enum EvaluationType {
+  ZERO
+  ONE_STEP
+  TWO_STEP
+}
+
+enum EvaluationVariant {
+  STANDARD
+  FLEX
+  PRO
+}
+
+enum EvaluationPhase {
+  EVALUATION
+  MASTER
+}
+
+enum EvaluationStatus {
+  PENDING
+  ACTIVE
+  PASSED
+  BREACHED
+  EXPIRED
+}
+
+model User {
+  id                             String     @id @default(cuid())
+  email                          String?    @unique
+  passwordHash                   String?
+  googleId                       String?    @unique
+  walletAddress                  String?    @unique
+  displayName                    String
+  avatarUrl                      String?
+  role                           UserRole   @default(TRADER)
+  status                         UserStatus @default(PENDING_VERIFICATION)
+  adminCanApproveKyc             Boolean    @default(false)
+  adminCanApprovePayouts         Boolean    @default(false)
+  adminCanApproveTpClaims        Boolean    @default(false)
+  adminCanManageSetups           Boolean    @default(false)
+  adminCanManageCopy             Boolean    @default(false)
+  emailVerified                  Boolean    @default(false)
+  emailVerifyToken               String?
+  registrationPaid               Boolean    @default(false)
+  profitShareActive              Boolean    @default(false)
+  profitShareEnrolledAt          DateTime?
+  referralCode                   String?    @unique
+  referredById                   String?
+  referralKycRewardedAt          DateTime?
+  referralPaidRewardedAt         DateTime?
+  referralKycSettledAt           DateTime?
+  referralPaidSettledAt          DateTime?
+  accessExpiresAt                DateTime?
+  termsAcceptedAt                DateTime?
+  lastLoginIp                    String?
+  presenceLastSeenAt             DateTime?
+  presencePath                   String?
+  metaApiAccountId               String?
+  selectedEvaluationEnrollmentId String?
+  mt5SyncActive                  Boolean    @default(false)
+  mt5SyncEnrolledAt              DateTime?
+  mt5SyncExpiresAt               DateTime?
+  mt5SyncEnabled                 Boolean    @default(true)
+  investorActive                 Boolean    @default(false)
+  investorEnrolledAt             DateTime?
+  investorVipActive              Boolean    @default(false)
+  investorVipExpiresAt           DateTime?
+  investorVipRemindedAt          DateTime?
+  /// Elite tier: instant withdraw anytime, no fees/penalties, free self-serve reinvest.
+  investorVvipActive             Boolean    @default(false)
+  investorVvipGrantedAt          DateTime?
+  investorVvipGrantedById        String?
+  depositorActive                Boolean    @default(false)
+  unitrustActive                 Boolean    @default(false)
+  unitrustEnrolledAt             DateTime?
+  airfarmingActive               Boolean    @default(false)
+  airfarmingEnrolledAt           DateTime?
+  instantWithdraw                Boolean    @default(false)
+  instantWithdrawGrantedAt       DateTime?
+  instantWithdrawGrantedById     String?
+  /// When true with instantWithdraw: admin-marked verified — skip KYC for withdrawals.
+  instantWithdrawKycExempt       Boolean    @default(false)
+  /// Set on first confirmed platform wallet deposit — unlocks daily auto-withdraw opt-in.
+  autoWithdrawEligible           Boolean    @default(false)
+  autoWithdrawEligibleAt         DateTime?
+  /// User opt-in: daily cron sends available balance to saved TRC20 wallet.
+  autoWithdrawEnabled            Boolean    @default(false)
+  autoWithdrawWalletId           String?
+  /// Fixed daily gross USDT; null = withdraw full available balance.
+  autoWithdrawAmount             Decimal?   @db.Decimal(12, 2)
+  lastAutoWithdrawAt             DateTime?
+  /// Bcrypt hash of 6-digit app PIN (unlock + withdraw auth).
+  appPinHash                     String?
+  appPinUpdatedAt                DateTime?
+  createdAt                      DateTime   @default(now())
+  updatedAt                      DateTime   @updatedAt
+
+  virtualAccount               VirtualAccount?
+  platformWallet               PlatformWallet?
+  investorSettings             InvestorSettings?
+  depositorPlans               DepositorPlan[]
+  investorTrades               InvestorTrade[]
+  investorDailyCredits         InvestorDailyCredit[]
+  unitrustDailyCredits         UnitrustDailyCredit[]
+  airfarmingWallet             AirfarmingWallet?
+  airfarmingState              AirfarmingState?
+  airfarmingEnrollment         AirfarmingEnrollment?
+  airfarmingDrops              AirfarmingDrop[]
+  airfarmingTransfers          AirfarmingTransfer[]
+  loans                        Loan[]
+  cashAgent                    CashAgent?
+  signals                      Signal[]
+  tradeScores                  TradeScore[]
+  rankings                     Ranking[]
+  payouts                      Payout[]
+  momoP2pWithdrawals           MomoP2pWithdrawal[]
+  subscriptions                Subscription[]
+  payments                     Payment[]
+  violations                   Violation[]
+  riskFlags                    RiskFlag[]
+  walletTransactions           WalletTransaction[]
+  signalDrafts                 SignalDraft[]
+  profile                      UserProfile?
+  kyc                          KycVerification?
+  tpClaims                     TpClaim[]
+  platformNotifications        PlatformNotification[]
+  directMessages               DirectMessage[]          @relation("MessageThread")
+  sentDirectMessages           DirectMessage[]          @relation("MessageSender")
+  messageThreadState           MessageThreadState?
+  loginOtps                    LoginOtp[]
+  passwordResets               PasswordReset[]
+  savedWithdrawalWallets       SavedWithdrawalWallet[]
+  withdrawalWalletOtps         WithdrawalWalletOtp[]
+  withdrawOtps                 WithdrawOtp[]
+  walletTransferOtps           WalletTransferOtp[]
+  walletTransfersFrom          WalletTransfer[]         @relation("WalletTransferFrom")
+  walletTransfersTo            WalletTransfer[]         @relation("WalletTransferTo")
+  chatParticipants             ChatParticipant[]
+  peerMessagesSent             PeerMessage[]
+  custodyDeposits              CustodyDeposit[]
+  copyTradesSource             CopyTrade[]              @relation("CopyTradeSource")
+  copyPoolEntry                CopyPoolTrader?          @relation("CopyPoolTrader")
+  copyPoolAdds                 CopyPoolTrader[]         @relation("CopyPoolAddedBy")
+  marketingEmails              MarketingEmail[]
+  mt5SyncLinks                 Mt5SyncLink[]
+  mt5LinkRequests              Mt5LinkRequest[]
+  evaluationEnrollments        EvaluationEnrollment[]
+  selectedEvaluationEnrollment EvaluationEnrollment?    @relation("SelectedEvaluationEnrollment", fields: [selectedEvaluationEnrollmentId], references: [id], onDelete: SetNull)
+  referredBy                   User?                    @relation("UserReferrals", fields: [referredById], references: [id], onDelete: SetNull)
+  referrals                    User[]                   @relation("UserReferrals")
+  referralSettlements          ReferralSettlement[]
+  accountTransfersFrom         AccountTransfer[]        @relation("AccountTransferFrom")
+  accountTransfersTo           AccountTransfer[]        @relation("AccountTransferTo")
+  pageEvents                   UserPageEvent[]
+  behaviorProfile              UserBehaviorProfile?
+  productEnrollments           UserProductEnrollment[]
+  productAgentPlans            ProductAgentPlan[]
+  chainWallets                 ChainWallet[]
+  chainDeposits                ChainDeposit[]
+  chainWithdrawals             ChainWithdrawal[]
+  chainRewards                 ChainReward[]
+  chainVaultPosition           ChainVaultPosition?
+  chainDailyCredits            ChainDailyCredit[]
+  chainNotifications           ChainNotification[]
+  chainReferralsAsReferrer     ChainReferral[]          @relation("ChainReferralReferrer")
+  chainReferralsAsReferee      ChainReferral[]          @relation("ChainReferralReferee")
+  chainContractEnrollment      ChainContractEnrollment?
+
+  @@index([status])
+  @@index([role])
+  @@map("users")
+}
+
+model UserProfile {
+  id                     String        @id @default(cuid())
+  userId                 String        @unique
+  firstName              String?
+  lastName               String?
+  phone                  String?
+  dateOfBirth            DateTime?
+  country                String?
+  preferredCurrency      String?
+  state                  String?
+  city                   String?
+  addressLine1           String?
+  addressLine2           String?
+  postalCode             String?
+  payoutMethod           PayoutMethod?
+  trc20Address           String?
+  mobileMoneyProvider    String?
+  mobileMoneyNumber      String?
+  mobileMoneyAccountName String?
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
+}
+
+model LoginOtp {
+  id        String    @id @default(cuid())
+  userId    String
+  email     String
+  codeHash  String
+  expiresAt DateTime
+  attempts  Int       @default(0)
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("login_otps")
+}
+
+model WithdrawalWalletOtp {
+  id        String    @id @default(cuid())
+  userId    String
+  email     String
+  codeHash  String
+  label     String
+  address   String
+  network   String
+  expiresAt DateTime
+  attempts  Int       @default(0)
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("withdrawal_wallet_otps")
+}
+
+/**
+ * Email OTP authorizing a specific wallet withdrawal (amount + destination).
+ */
+model WithdrawOtp {
+  id            String    @id @default(cuid())
+  userId        String
+  email         String
+  codeHash      String
+  amount        Decimal   @db.Decimal(18, 2)
+  savedWalletId String
+  expiresAt     DateTime
+  attempts      Int       @default(0)
+  usedAt        DateTime?
+  createdAt     DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("withdraw_otps")
+}
+
+/**
+ * Email OTP authorizing an internal wallet→wallet transfer (amount + recipient).
+ */
+model WalletTransferOtp {
+  id        String    @id @default(cuid())
+  fromUserId String
+  toUserId  String
+  toEmail   String
+  email     String
+  codeHash  String
+  amount    Decimal   @db.Decimal(18, 2)
+  expiresAt DateTime
+  attempts  Int       @default(0)
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  fromUser User @relation(fields: [fromUserId], references: [id], onDelete: Cascade)
+
+  @@index([fromUserId, expiresAt])
+  @@map("wallet_transfer_otps")
+}
+
+model WalletTransfer {
+  id          String   @id @default(cuid())
+  fromUserId  String
+  toUserId    String
+  amount      Decimal  @db.Decimal(12, 2)
+  referenceId String   @unique
+  status      String   @default("COMPLETED")
+  createdAt   DateTime @default(now())
+
+  fromUser User @relation("WalletTransferFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser   User @relation("WalletTransferTo", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@index([fromUserId, createdAt])
+  @@index([toUserId, createdAt])
+  @@map("wallet_transfers")
+}
+
+model SavedWithdrawalWallet {
+  id         String   @id @default(cuid())
+  userId     String
+  label      String
+  address    String
+  network    String
+  verifiedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, address, network])
+  @@index([userId])
+  @@map("saved_withdrawal_wallets")
+}
+
+model PasswordReset {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("password_resets")
+}
+
+model KycVerification {
+  id                     String           @id @default(cuid())
+  userId                 String           @unique
+  status                 KycStatus        @default(NOT_STARTED)
+  documentType           KycDocumentType?
+  documentNumber         String?
+  documentFrontUrl       String?
+  documentBackUrl        String?
+  selfieUrl              String?
+  rejectionReason        String?
+  submittedAt            DateTime?
+  reviewedAt             DateTime?
+  pendingUploadFilenames String[]         @default([])
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime         @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("kyc_verifications")
+}
+
+model UploadBlob {
+  filename    String   @id
+  category    String
+  data        Bytes
+  contentType String   @map("content_type")
+  size        Int
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([category])
+  @@map("upload_blobs")
+}
+
+model VirtualAccount {
+  id                         String    @id @default(cuid())
+  userId                     String    @unique
+  balance                    Decimal   @default(1000) @db.Decimal(12, 2)
+  tier                       RankTier  @default(BRONZE)
+  riskPercent                Decimal   @default(5) @db.Decimal(5, 2)
+  maxRiskPerTrade            Decimal   @default(50) @db.Decimal(12, 2)
+  weeklyProfit               Decimal   @default(0) @db.Decimal(12, 2)
+  totalProfit                Decimal   @default(0) @db.Decimal(12, 2)
+  profitShareBalance         Decimal   @default(0) @db.Decimal(12, 2)
+  profitShareEarned          Decimal   @default(0) @db.Decimal(12, 2)
+  winRate                    Decimal   @default(0) @db.Decimal(5, 2)
+  score                      Int       @default(0)
+  consecutiveWins            Int       @default(0)
+  consecutiveLosses          Int       @default(0)
+  maxDrawdown                Decimal   @default(0) @db.Decimal(5, 2)
+  currentDrawdown            Decimal   @default(0) @db.Decimal(5, 2)
+  totalTrades                Int       @default(0)
+  winningTrades              Int       @default(0)
+  losingTrades               Int       @default(0)
+  streakWarningIssued        Boolean   @default(false)
+  leaderboardLastEmailedRank Int?
+  leaderboardLastEmailedAt   DateTime?
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("virtual_accounts")
+}
+
+model Signal {
+  id                       String         @id @default(cuid())
+  signalId                 String         @unique @default(cuid())
+  userId                   String
+  symbol                   String
+  direction                TradeDirection
+  entryMin                 Decimal        @db.Decimal(18, 8)
+  entryMax                 Decimal        @db.Decimal(18, 8)
+  stopLoss                 Decimal        @db.Decimal(18, 8)
+  takeProfit               Decimal        @db.Decimal(18, 8)
+  riskRewardRatio          Decimal        @db.Decimal(5, 2)
+  description              String
+  screenshotUrl            String
+  screenshotHash           String?
+  status                   SignalStatus   @default(PENDING)
+  submittedAt              DateTime       @default(now())
+  resolvedAt               DateTime?
+  pnl                      Decimal?       @db.Decimal(12, 2)
+  pointsAwarded            Int            @default(0)
+  hubSenderName            String?
+  hubRecordId              String?
+  hubOrderNotifiedAt       DateTime?
+  tp1ClaimNoticeApprovedAt DateTime?
+  metaApiAccountId         String?
+  metaApiOrderId           String?
+  metaApiPositionId        String?
+  metaApiExecutedAt        DateTime?
+  limitAutoPlaceDisabled   Boolean        @default(false)
+  source                   String         @default("manual")
+  signalSource             SignalSource   @default(TRADER)
+
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trade          Trade?
+  tradeScore     TradeScore?
+  tpClaims       TpClaim[]
+  copyTrade      CopyTrade?
+  mt5SyncLink    Mt5SyncLink?
+  investorTrades InvestorTrade[]
+
+  @@index([userId])
+  @@index([symbol, direction])
+  @@index([submittedAt])
+  @@index([status])
+  @@map("signals")
+}
+
+model SignalDraft {
+  id            String          @id @default(cuid())
+  userId        String
+  symbol        String?
+  direction     TradeDirection?
+  entryMin      Decimal?        @db.Decimal(18, 8)
+  entryMax      Decimal?        @db.Decimal(18, 8)
+  stopLoss      Decimal?        @db.Decimal(18, 8)
+  takeProfit    Decimal?        @db.Decimal(18, 8)
+  description   String?
+  screenshotUrl String?
+  aiFilled      Boolean         @default(false)
+  progress      Int             @default(0)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, updatedAt])
+  @@map("signal_drafts")
+}
+
+model Trade {
+  id                  String         @id @default(cuid())
+  signalId            String         @unique
+  userId              String
+  symbol              String
+  direction           TradeDirection
+  entryMin            Decimal        @db.Decimal(18, 8)
+  entryMax            Decimal        @db.Decimal(18, 8)
+  entryPrice          Decimal?       @db.Decimal(18, 8)
+  stopLoss            Decimal        @db.Decimal(18, 8)
+  takeProfit          Decimal        @db.Decimal(18, 8)
+  exitPrice           Decimal?       @db.Decimal(18, 8)
+  pnl                 Decimal?       @db.Decimal(12, 2)
+  isWin               Boolean?
+  activatedAt         DateTime?
+  tp1NotifiedAt       DateTime?
+  tp1BreakevenAt      DateTime?
+  breakevenPending    Boolean        @default(false)
+  breakevenRetryCount Int            @default(0)
+  partialClosedAt     DateTime?
+  partialCloseVolume  Decimal?       @db.Decimal(18, 8)
+  partialCloseProfit  Decimal?       @db.Decimal(12, 2)
+  closedAt            DateTime?
+  createdAt           DateTime       @default(now())
+
+  signal Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("trades")
+}
+
+model TpClaim {
+  id                  String         @id @default(cuid())
+  userId              String
+  signalId            String
+  symbol              String
+  direction           TradeDirection
+  exitPrice           Decimal        @db.Decimal(18, 8)
+  beforeScreenshotUrl String
+  afterScreenshotUrl  String
+  claimType           TpClaimType    @default(FULL_TP)
+  status              TpClaimStatus  @default(PENDING_REVIEW)
+  adminNote           String?
+  reviewedAt          DateTime?
+  reviewedById        String?
+  submittedAt         DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  signal Signal  @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  payout Payout?
+
+  @@index([userId, status])
+  @@index([status, submittedAt])
+  @@map("tp_claims")
+}
+
+model WalletTransaction {
+  id           String       @id @default(cuid())
+  userId       String
+  amount       Decimal      @db.Decimal(12, 2)
+  type         WalletTxType
+  referenceId  String?
+  description  String
+  balanceAfter Decimal?     @db.Decimal(12, 2)
+  createdAt    DateTime     @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@map("wallet_transactions")
+}
+
+model TradeScore {
+  id               String   @id @default(cuid())
+  userId           String
+  signalId         String   @unique
+  basePoints       Int      @default(0)
+  rrBonus          Int      @default(0)
+  consistencyBonus Int      @default(0)
+  totalPoints      Int      @default(0)
+  weekNumber       Int
+  year             Int
+  createdAt        DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  signal Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@index([userId, year, weekNumber])
+  @@map("trade_scores")
+}
+
+model Ranking {
+  id           String   @id @default(cuid())
+  userId       String
+  tier         RankTier @default(BRONZE)
+  rank         Int
+  score        Int      @default(0)
+  profit       Decimal  @default(0) @db.Decimal(12, 2)
+  winRate      Decimal  @default(0) @db.Decimal(5, 2)
+  drawdown     Decimal  @default(0) @db.Decimal(5, 2)
+  consistency  Decimal  @default(0) @db.Decimal(5, 2)
+  weekNumber   Int
+  year         Int
+  calculatedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, year, weekNumber])
+  @@index([year, weekNumber, rank])
+  @@map("rankings")
+}
+
+model Leaderboard {
+  id          String   @id @default(cuid())
+  userId      String
+  displayName String
+  tier        RankTier
+  rank        Int
+  score       Int
+  profit      Decimal  @db.Decimal(12, 2)
+  winRate     Decimal  @db.Decimal(5, 2)
+  drawdown    Decimal  @db.Decimal(5, 2)
+  consistency Decimal  @db.Decimal(5, 2)
+  weekNumber  Int
+  year        Int
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, year, weekNumber])
+  @@index([year, weekNumber, rank])
+  @@map("leaderboard")
+}
+
+model Payout {
+  id              String        @id @default(cuid())
+  userId          String
+  virtualProfit   Decimal       @db.Decimal(12, 2)
+  traderShare     Decimal       @db.Decimal(12, 2)
+  platformShare   Decimal       @db.Decimal(12, 2)
+  traderPercent   Decimal       @default(40) @db.Decimal(5, 2)
+  status          PayoutStatus  @default(PENDING)
+  source          PayoutSource  @default(WEEKLY)
+  tpClaimId       String?       @unique
+  payoutMethod    PayoutMethod?
+  weekNumber      Int
+  year            Int
+  walletAddress   String?
+  rewardTier      String?
+  requestedAt     DateTime      @default(now())
+  processedAt     DateTime?
+  notes           String?
+  gatewayPayoutId String?
+  /// Sunday auto-batch: when the cron should approve/send this withdrawal.
+  scheduledApproveAt       DateTime?
+  /// Sunday auto-batch: ETA email sent to the user.
+  sundayBatchEtaNotifiedAt DateTime?
+
+  user    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tpClaim TpClaim?           @relation(fields: [tpClaimId], references: [id], onDelete: SetNull)
+  momoP2p MomoP2pWithdrawal?
+
+  @@index([userId])
+  @@index([status])
+  @@index([status, scheduledApproveAt])
+  @@map("payouts")
+}
+
+/// Manual MoMo P2P withdrawal — admin/agent sends UGX after Binance C2C quote; user, admin, or agent confirms.
+model MomoP2pWithdrawal {
+  id               String        @id @default(cuid())
+  userId           String
+  payoutId         String        @unique
+  amountUsdt       Decimal       @db.Decimal(12, 2)
+  amountUgx        Decimal       @db.Decimal(18, 2)
+  rateUgxPerUsdt   Decimal       @db.Decimal(18, 4)
+  momoNetwork      String
+  momoPhone        String
+  momoLabel        String?
+  recipientName    String?
+  status           MomoP2pStatus @default(INITIATED)
+  opsEmailSentAt   DateTime?
+  userConfirmedAt  DateTime?
+  adminConfirmedAt DateTime?
+  /// Cash agent who claimed / is processing this payout.
+  agentId          String?
+  agentClaimedAt   DateTime?
+  agentConfirmedAt DateTime?
+  /// Screenshot proof URL uploaded by agent when confirming send.
+  agentProofUrl    String?
+  completedAt      DateTime?
+  completedBy      String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payout Payout     @relation(fields: [payoutId], references: [id], onDelete: Cascade)
+  agent  CashAgent? @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([status])
+  @@index([agentId, status])
+  @@map("momo_p2p_withdrawals")
+}
+
+model CustodyDeposit {
+  id              String        @id @default(cuid())
+  adminId         String
+  amount          Decimal       @db.Decimal(18, 8)
+  currency        String        @default("USDT")
+  network         String
+  status          PaymentStatus @default(PENDING)
+  gatewayId       String?
+  gatewayResponse Json?
+  payAddress      String?
+  payAmount       Decimal?      @db.Decimal(18, 8)
+  txHash          String?
+  confirmedAt     DateTime?
+  createdAt       DateTime      @default(now())
+
+  admin User @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@index([status])
+  @@index([status, payAddress])
+  @@map("custody_deposits")
+}
+
+model Subscription {
+  id        String           @id @default(cuid())
+  userId    String
+  plan      SubscriptionPlan @default(FREE)
+  startsAt  DateTime         @default(now())
+  expiresAt DateTime?
+  isActive  Boolean          @default(true)
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("subscriptions")
+}
+
+model MarketingEmail {
+  id       String   @id @default(cuid())
+  userId   String
+  email    String
+  audience String // "unpaid_registration" | "inactive_trader" | "kyc_incomplete"
+  subject  String
+  status   String // "SENT" | "FAILED" | "SKIPPED"
+  detail   String?
+  sentAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, sentAt])
+  @@index([sentAt])
+  @@map("marketing_emails")
+}
+
+model Payment {
+  id              String        @id @default(cuid())
+  userId          String
+  amount          Decimal       @db.Decimal(18, 8)
+  currency        String        @default("USDT")
+  network         String
+  status          PaymentStatus @default(PENDING)
+  gatewayId       String?
+  gatewayResponse Json?
+  txHash          String?
+  purpose         String        @default("registration")
+  payAddress      String?
+  payAmount       Decimal?      @db.Decimal(18, 8)
+  createdAt       DateTime      @default(now())
+  confirmedAt     DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([status, payAddress])
+  @@map("payments")
+}
+
+model EvaluationEnrollment {
+  id                 String            @id @default(cuid())
+  userId             String
+  type               EvaluationType
+  variant            EvaluationVariant @default(FLEX)
+  planId             String
+  evaluationSize     Decimal           @db.Decimal(18, 2)
+  feeUsdt            Decimal           @db.Decimal(18, 8)
+  status             EvaluationStatus  @default(PENDING)
+  phase              EvaluationPhase   @default(EVALUATION)
+  maxLossPercent     Decimal           @db.Decimal(8, 4)
+  dailyLossPercent   Decimal           @db.Decimal(8, 4)
+  profitTargetPhase1 Decimal?          @db.Decimal(8, 4)
+  profitTargetPhase2 Decimal?          @db.Decimal(8, 4)
+  consistencyPercent Decimal?          @db.Decimal(8, 4)
+  profitSplitLabel   String
+  metaApiAccountId   String?
+  startEquity        Decimal?          @db.Decimal(18, 8)
+  highWaterMark      Decimal?          @db.Decimal(18, 8)
+  dayStartEquity     Decimal?          @db.Decimal(18, 8)
+  dayStartedAt       DateTime?
+  currentEquity      Decimal?          @db.Decimal(18, 8)
+  breachedAt         DateTime?
+  breachReason       String?
+  paymentId          String?           @unique
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  user            User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  selectedByUsers User[] @relation("SelectedEvaluationEnrollment")
+
+  @@index([userId, status])
+  @@index([status])
+  @@map("evaluation_enrollments")
+}
+
+model Violation {
+  id          String        @id @default(cuid())
+  userId      String
+  type        ViolationType
+  description String
+  evidence    Json?
+  resolved    Boolean       @default(false)
+  createdAt   DateTime      @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("violations")
+}
+
+model RiskFlag {
+  id        String   @id @default(cuid())
+  userId    String
+  reason    String
+  severity  Int      @default(1)
+  metadata  Json?
+  resolved  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("risk_flags")
+}
+
+model ReferralSettlement {
+  id             String   @id @default(cuid())
+  userId         String
+  amountUsdt     Decimal  @db.Decimal(12, 2)
+  kycCount       Int
+  paidCount      Int
+  kycRewardUsdt  Decimal  @db.Decimal(10, 2)
+  paidRewardUsdt Decimal  @db.Decimal(10, 2)
+  note           String?
+  paidByAdminId  String
+  walletTxId     String?
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@map("referral_settlements")
+}
+
+model PlatformConfig {
+  id                                  String    @id @default("default")
+  registrationFeeUsdt                 Decimal   @default(5) @db.Decimal(10, 2)
+  traderPayoutPercent                 Decimal   @default(40) @db.Decimal(5, 2)
+  platformPayoutPercent               Decimal   @default(60) @db.Decimal(5, 2)
+  riskPercent                         Decimal   @default(5) @db.Decimal(5, 2)
+  startingBalance                     Decimal   @default(1000) @db.Decimal(12, 2)
+  winPoints                           Int       @default(10)
+  lossPoints                          Int       @default(-5)
+  duplicateThreshold                  Decimal   @default(0.9) @db.Decimal(3, 2)
+  entryTolerancePercent               Decimal   @default(0.2) @db.Decimal(5, 2)
+  tpRewardUsd                         Decimal   @default(5) @db.Decimal(10, 2)
+  profitShareFeeUsdt                  Decimal   @default(50) @db.Decimal(10, 2)
+  profitSharePercent                  Decimal   @default(50) @db.Decimal(5, 2)
+  profitShareWithdrawThresholdPercent Decimal   @default(40) @db.Decimal(5, 2)
+  requireKycForPayouts                Boolean   @default(true)
+  referralKycRewardUsdt               Decimal   @default(0.5) @db.Decimal(10, 2)
+  referralPaidRewardUsdt              Decimal   @default(1) @db.Decimal(10, 2)
+  copyRiskPercent                     Decimal   @default(5) @db.Decimal(5, 2)
+  copyNotifyEmail                     String    @default("willeratmit12@gmail.com")
+  copyUseTwoToOneRr                   Boolean   @default(true)
+  copyAutoBreakevenEnabled            Boolean   @default(true)
+  copyEmailAlertsEnabled              Boolean   @default(true)
+  copyTradesEnabled                   Boolean   @default(true)
+  copyHealthReady                     Boolean   @default(false)
+  copyHealthMessage                   String?
+  copyHealthCheckedAt                 DateTime?
+  mt5SyncFeeUsdt                      Decimal   @default(5) @db.Decimal(10, 2)
+  weeklyTierPayoutsEnabled            Boolean   @default(false)
+  investorFeeUsdt                     Decimal   @default(10) @db.Decimal(10, 2)
+  investorDailyYieldPercent           Decimal   @default(8) @db.Decimal(5, 2)
+  investorYieldPaused                 Boolean   @default(false)
+  /// When true (and on/after 27 Jul 2026), Smart Invest balances under $500 do not earn daily yield unless the user is exempt.
+  investorMinBalanceEnforced          Boolean   @default(true)
+  unitrustDailyYieldPercent           Decimal   @default(5) @db.Decimal(5, 2)
+  unitrustYieldPaused                 Boolean   @default(false)
+  unitrustMinDepositUsdt              Decimal   @default(100) @db.Decimal(10, 2)
+  depositorDailyYieldPercent          Decimal   @default(0.5) @db.Decimal(5, 2)
+  depositorMinDepositUsdt             Decimal   @default(50) @db.Decimal(10, 2)
+  loginOtpEnabled                     Boolean   @default(false) @map("login_otp_enabled")
+  /// Set after the 24h investment/deposit yield-hold policy email is broadcast once.
+  investorYieldHoldAnnouncedAt        DateTime?
+  /// Set after the under-$500 auto-stop policy email is broadcast once.
+  investorAutoStopAnnouncedAt         DateTime?
+  /// Set after the $1000+ loan eligibility email is broadcast once.
+  investorLoanEligibilityAnnouncedAt  DateTime?
+  /// Set after active-borrower withdraw-restriction email is broadcast once.
+  activeLoanWithdrawPolicyAnnouncedAt DateTime?
+  /// Set after the trader-program sunset email is broadcast once.
+  traderProgramSunsetAnnouncedAt      DateTime?
+  /// Preferred withdrawal cadence: WEEKLY (Sunday UTC) or MONTHLY (1st UTC).
+  withdrawalScheduleEnabled           Boolean   @default(true)
+  withdrawalPreferredSchedule         String    @default("WEEKLY")
+  /// Extra % of gross charged when withdrawing outside the preferred window.
+  withdrawalOffSchedulePenaltyPercent Decimal   @default(8) @db.Decimal(5, 2)
+  walletWithdrawalFeeUsdt             Decimal   @default(3) @db.Decimal(10, 2)
+  /// Set after the withdrawal schedule / early-exit policy email is broadcast once.
+  withdrawalScheduleAnnouncedAt       DateTime?
+  /// Set after the Airfarming launch email to Smart Invest alumni is broadcast once.
+  airfarmingLaunchAnnouncedAt         DateTime?
+  /// Set after the self-serve reinvest (30% fee) policy email is broadcast once.
+  investorReinvestPolicyAnnouncedAt   DateTime?
+  /// Anchor time for the active Sunday wallet-withdraw auto-batch (UTC).
+  sundayWithdrawBatchAnchor           DateTime?
+  /// Set when the Sunday batch finishes (admin summary + KYC sweep done).
+  sundayWithdrawBatchFinalizedAt      DateTime?
+  /// Set when the admin schedule email was sent for the active Sunday batch.
+  sundayWithdrawBatchScheduleNotifiedAt DateTime?
+  /// Kampala calendar date for which Smart Invest yield delivery time was chosen.
+  investorYieldScheduleDate             DateTime? @db.Date
+  /// Minutes from Kampala midnight (0–1439) when Smart Invest yield credits today.
+  investorYieldScheduleMinute           Int?
+  /// Kampala calendar date when Smart Invest yield was delivered for that day.
+  investorYieldDeliveredDate            DateTime? @db.Date
+  /// Kampala calendar date when the 21:00 Smart Invest daily report email was sent.
+  investorDailyReportSentDate           DateTime? @db.Date
+
+  /// Deriv WebSocket API — admin-configured credentials for programmatic access.
+  derivAppId            String?
+  derivApiToken         String?
+  derivEndpoint         String? @default("wss://ws.derivws.com/websockets/v3")
+  derivOAuthRedirectUrl String?
+  derivEnabled          Boolean @default(false)
+  derivNotes            String? @db.Text
+
+  /// Launch / vault contract config (Remix deploy) — preferred over env when set.
+  contractAddress      String?
+  contractChainId      Int?
+  contractNetworkLabel String?
+  contractNetworkKind  String?
+  contractAbi          String? @db.Text
+  contractRpcUrl       String?
+  contractAdminWallet  String?
+  contractExplorerUrl  String?
+  contractRemixRef     String?
+  contractNotes        String? @db.Text
+
+  @@map("platform_config")
+}
+
+model PlatformWallet {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  availableBalance Decimal  @default(0) @db.Decimal(12, 2)
+  lockedBalance    Decimal  @default(0) @db.Decimal(12, 2)
+  investorBalance  Decimal  @default(0) @db.Decimal(12, 2)
+  unitrustBalance  Decimal  @default(0) @db.Decimal(12, 2)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("platform_wallets")
+}
+
+model DepositorPlan {
+  id                String              @id @default(cuid())
+  userId            String
+  amount            Decimal             @db.Decimal(12, 2)
+  riskPercent       Decimal             @db.Decimal(5, 2)
+  dailyYieldPercent Decimal             @db.Decimal(5, 2)
+  startAt           DateTime
+  endAt             DateTime
+  status            DepositorPlanStatus @default(ACTIVE)
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  user    User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  credits DepositorDailyCredit[]
+
+  @@index([userId, status])
+  @@index([status, startAt])
+  @@map("depositor_plans")
+}
+
+model DepositorDailyCredit {
+  id         String   @id @default(cuid())
+  planId     String
+  dayIndex   Int
+  amount     Decimal  @db.Decimal(12, 2)
+  creditedAt DateTime @default(now())
+
+  plan DepositorPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@unique([planId, dayIndex])
+  @@map("depositor_daily_credits")
+}
+
+model InvestorSettings {
+  id                        String    @id @default(cuid())
+  userId                    String    @unique
+  riskPercent               Decimal   @default(2) @db.Decimal(5, 2)
+  dailyYieldPercent         Decimal?  @db.Decimal(5, 2)
+  committedInvestmentAmount Decimal?  @db.Decimal(12, 2)
+  useTwoToOneRr             Boolean   @default(true)
+  paused                    Boolean   @default(false)
+  yieldPaused               Boolean   @default(false)
+  /// Admin override: allow this user to earn even when under the platform min invest balance.
+  minBalanceExempt          Boolean   @default(false)
+  /// When true, daily yield is compounded into investment (90%) after a 10% platform fee.
+  autoReinvestEarnings      Boolean   @default(false)
+  lastHealthAt              DateTime?
+  lastHealthReady           Boolean   @default(false)
+  lastHealthMessage         String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("investor_settings")
+}
+
+model InvestorTrade {
+  id                String              @id @default(cuid())
+  signalId          String
+  userId            String
+  investorAccountId String
+  symbol            String
+  direction         TradeDirection
+  volume            Decimal?            @db.Decimal(18, 8)
+  entryPrice        Decimal?            @db.Decimal(18, 8)
+  stopLoss          Decimal             @db.Decimal(18, 8)
+  takeProfit        Decimal             @db.Decimal(18, 8)
+  metaApiOrderId    String?
+  metaApiPositionId String?
+  status            InvestorTradeStatus @default(PENDING)
+  profit            Decimal?            @db.Decimal(12, 2)
+  notes             String?
+  executedAt        DateTime?
+  closedAt          DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  signal Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([signalId, userId])
+  @@index([userId])
+  @@index([status])
+  @@map("investor_trades")
+}
+
+model InvestorDailyCredit {
+  id           String   @id @default(cuid())
+  userId       String
+  amount       Decimal  @db.Decimal(12, 2)
+  yieldPercent Decimal  @db.Decimal(5, 2)
+  baseBalance  Decimal  @db.Decimal(12, 2)
+  creditDate   DateTime @db.Date
+  creditedAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, creditDate])
+  @@index([userId, creditDate])
+  @@map("investor_daily_credits")
+}
+
+/// Unitrust daily yield ledger — 5% of unitrustBalance credited once per Kampala day.
+model UnitrustDailyCredit {
+  id           String   @id @default(cuid())
+  userId       String
+  amount       Decimal  @db.Decimal(12, 2)
+  yieldPercent Decimal  @db.Decimal(5, 2)
+  baseBalance  Decimal  @db.Decimal(12, 2)
+  creditDate   DateTime @db.Date
+  creditedAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, creditDate])
+  @@index([userId, creditDate])
+  @@map("unitrust_daily_credits")
+}
+
+/// Airfarming working balance — only non-zero during drop prep/settle windows.
+model AirfarmingWallet {
+  userId    String   @id
+  balance   Decimal  @default(0) @db.Decimal(18, 2)
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("airfarming_wallets")
+}
+
+/// Per-user weekly commitment, yield tracking, and float preferences.
+model AirfarmingState {
+  userId            String   @id
+  weekStart         DateTime @db.Date
+  /// Highest committed allocation this UTC week (inclusive floor baseline).
+  weekInvestmentUsd Decimal  @default(0) @db.Decimal(18, 2)
+  /// Running net yield credited this UTC week.
+  weekYieldUsd      Decimal  @default(0) @db.Decimal(18, 2)
+  /// User's current committed capital (idle in cash until float prep).
+  committedUsd      Decimal  @default(0) @db.Decimal(18, 2)
+  autoFloatEnabled  Boolean  @default(true)
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("airfarming_state")
+}
+
+/// Application gate — users must be approved before allocating to Airfarming.
+model AirfarmingEnrollment {
+  userId                 String                       @id
+  status                 AirfarmingEnrollmentStatus   @default(PENDING)
+  appliedAt              DateTime                     @default(now())
+  reviewedAt             DateTime?
+  reviewedById           String?
+  approvedAt             DateTime?
+  rejectionReason        String?
+  fullName               String
+  email                  String
+  age                    Int
+  location               String
+  plannedInvestmentUsd   Decimal                      @db.Decimal(18, 2)
+  withdrawPreference     AirfarmingWithdrawPreference
+  termsAcceptedAt        DateTime
+  updatedAt              DateTime                     @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, appliedAt])
+  @@map("airfarming_enrollments")
+}
+
+model AirfarmingDrop {
+  id                         String               @id @default(cuid())
+  userId                     String
+  weekStart                  DateTime             @db.Date
+  dropIndex                  Int
+  dueAt                      DateTime
+  percent                    Decimal              @db.Decimal(8, 4)
+  minBalance                 Decimal              @db.Decimal(18, 2)
+  maxBalance                 Decimal              @db.Decimal(18, 2)
+  bandIndex                  Int
+  status                     AirfarmingDropStatus @default(SCHEDULED)
+  source                     AirfarmingDropSource @default(NATURAL)
+  eligibleBalance            Decimal?             @db.Decimal(18, 2)
+  profitAmount               Decimal?             @db.Decimal(18, 2)
+  paidAt                     DateTime?
+  eligibilitySnapshotAt      DateTime?
+  eligibilitySnapshotBalance Decimal?             @db.Decimal(18, 2)
+  floatPreparedAt            DateTime?
+  createdAt                  DateTime             @default(now())
+  updatedAt                  DateTime             @updatedAt
+
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transfers AirfarmingTransfer[]
+
+  @@unique([userId, weekStart, dropIndex])
+  @@index([status, dueAt])
+  @@index([userId, weekStart])
+  @@map("airfarming_drops")
+}
+
+model AirfarmingDropBand {
+  bandIndex   Int      @id
+  label       String
+  minBalance  Decimal  @db.Decimal(18, 2)
+  maxBalance  Decimal  @db.Decimal(18, 2)
+  percent     Decimal  @db.Decimal(8, 4)
+  active      Boolean  @default(true)
+  updatedAt   DateTime @updatedAt
+
+  @@map("airfarming_drop_bands")
+}
+
+model AirfarmingPlatformSettings {
+  id                      String   @id @default("default")
+  maxPercent              Decimal  @default(57.9) @db.Decimal(8, 4)
+  maxProfitPerDrop        Decimal  @default(5000) @db.Decimal(18, 2)
+  weeklyYieldFloorRate    Decimal  @default(0.5) @db.Decimal(8, 4)
+  dropIntervalHours       Int[]    @default([2, 3, 5])
+  eligibilitySnapshotHours Int     @default(24)
+  floatPrepHours          Int      @default(24)
+  platformFeeRate         Decimal  @default(0.1) @db.Decimal(8, 4)
+  globallyPaused          Boolean  @default(false)
+  updatedAt               DateTime @updatedAt
+
+  @@map("airfarming_platform_settings")
+}
+
+model AirfarmingTransfer {
+  id            String                      @id @default(cuid())
+  userId        String
+  amount        Decimal                     @db.Decimal(18, 2)
+  direction     AirfarmingTransferDirection
+  reason        AirfarmingTransferReason
+  relatedDropId String?
+  createdAt     DateTime                    @default(now())
+
+  user User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  drop AirfarmingDrop? @relation(fields: [relatedDropId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@map("airfarming_transfers")
+}
+
+/// Earnings-advance loan: 80% of projected period earnings, 20% interest on principal.
+model Loan {
+  id                   String     @id @default(cuid())
+  userId               String
+  term                 LoanTerm
+  status               LoanStatus @default(PENDING)
+  /// Estimated daily earning used for the quote (investor + unitrust).
+  dailyEarningEstimate Decimal    @db.Decimal(12, 2)
+  /// Period days (1 / 7 / 30).
+  periodDays           Int
+  /// dailyEarningEstimate × periodDays
+  projectedEarnings    Decimal    @db.Decimal(12, 2)
+  advancePercent       Decimal    @default(80) @db.Decimal(5, 2)
+  interestPercent      Decimal    @default(20) @db.Decimal(5, 2)
+  /// Amount disbursed to wallet on approval (80% of projected).
+  principal            Decimal    @db.Decimal(12, 2)
+  /// USDT withdrawn against this loan while APPROVED (capped at principal).
+  withdrawnAgainstLoan Decimal    @default(0) @db.Decimal(12, 2)
+  /// Interest owed (20% of principal).
+  interestAmount       Decimal    @db.Decimal(12, 2)
+  /// principal + interestAmount
+  totalDue             Decimal    @db.Decimal(12, 2)
+  dueAt                DateTime?
+  requestedAt          DateTime   @default(now())
+  reviewedAt           DateTime?
+  reviewedById         String?
+  approvedAt           DateTime?
+  repaidAt             DateTime?
+  rejectedReason       String?
+  adminNote            String?
+  /// Snapshot of balances / yields used for quote.
+  quoteSnapshot        Json?
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([status, requestedAt])
+  @@map("loans")
+}
+
+model PromoCode {
+  id              String   @id @default(cuid())
+  code            String   @unique
+  discountPercent Int
+  description     String
+  expiresAt       DateTime
+  active          Boolean  @default(true)
+  maxUses         Int?
+  createdById     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([expiresAt])
+  @@index([active])
+  @@map("promo_codes")
+}
+
+/// Field cash agent — unlocks /agent with a code to process MoMo P2P withdrawals.
+model CashAgent {
+  id           String          @id @default(cuid())
+  userId       String?         @unique
+  /// Access code shown after approval / when admin creates the agent. Null while PENDING.
+  code         String?         @unique
+  displayName  String
+  phone        String?
+  email        String?
+  status       CashAgentStatus @default(PENDING)
+  applyNote    String?
+  adminNote    String?
+  approvedAt   DateTime?
+  approvedById String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  user     User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  sessions CashAgentSession[]
+  momoJobs MomoP2pWithdrawal[]
+
+  @@index([status])
+  @@index([email])
+  @@map("cash_agents")
+}
+
+model CashAgentSession {
+  id         String    @id @default(cuid())
+  agentId    String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+
+  agent CashAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId])
+  @@index([expiresAt])
+  @@map("cash_agent_sessions")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  adminId   String
+  action    String
+  targetId  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([adminId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+/// Admin-initiated merge of assets from a duplicate/unwanted account onto a keep account.
+model AccountTransfer {
+  id               String                @id @default(cuid())
+  fromUserId       String
+  toUserId         String
+  adminId          String
+  status           AccountTransferStatus @default(PENDING_USER)
+  tokenHash        String                @unique
+  expiresAt        DateTime
+  userAgreedAt     DateTime?
+  reviewStartedAt  DateTime?
+  finalizeAfter    DateTime?
+  completedAt      DateTime?
+  cancelledAt      DateTime?
+  snapshot         Json?
+  adminNote        String?
+  agreementVersion String                @default("v1")
+  failureReason    String?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  fromUser User @relation("AccountTransferFrom", fields: [fromUserId], references: [id], onDelete: Restrict)
+  toUser   User @relation("AccountTransferTo", fields: [toUserId], references: [id], onDelete: Restrict)
+
+  @@index([status, finalizeAfter])
+  @@index([fromUserId])
+  @@index([toUserId])
+  @@map("account_transfers")
+}
+
+model PlatformNotification {
+  id        String    @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String    @db.Text
+  linkUrl   String?
+  signalId  String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+  @@map("platform_notifications")
+}
+
+model DirectMessage {
+  id         String    @id @default(cuid())
+  userId     String
+  senderId   String
+  senderRole UserRole
+  body       String    @db.Text
+  isAgent    Boolean   @default(false) @map("is_agent")
+  readAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  threadUser User @relation("MessageThread", fields: [userId], references: [id], onDelete: Cascade)
+  sender     User @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+  @@map("direct_messages")
+}
+
+model MessageThreadState {
+  userId       String    @id @map("user_id")
+  agentEnabled Boolean   @default(true) @map("agent_enabled")
+  escalatedAt  DateTime? @map("escalated_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("message_thread_states")
+}
+
+/// Peer-to-peer private chat (separate from support DirectMessage threads).
+model ChatConversation {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  participants ChatParticipant[]
+  messages     PeerMessage[]
+
+  @@map("chat_conversations")
+}
+
+model ChatParticipant {
+  id             String   @id @default(cuid())
+  conversationId String
+  userId         String
+  lastReadAt     DateTime?
+  createdAt      DateTime @default(now())
+
+  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId, createdAt])
+  @@map("chat_participants")
+}
+
+model PeerMessage {
+  id             String    @id @default(cuid())
+  conversationId String
+  senderId       String
+  body           String    @db.Text
+  createdAt      DateTime  @default(now())
+
+  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User             @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@index([senderId, createdAt])
+  @@map("peer_messages")
+}
+
+model CopyPoolTrader {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  addedById String?
+  createdAt DateTime @default(now())
+
+  user    User  @relation("CopyPoolTrader", fields: [userId], references: [id], onDelete: Cascade)
+  addedBy User? @relation("CopyPoolAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@map("copy_pool_traders")
+}
+
+model Mt5SyncLink {
+  id               String            @id @default(cuid())
+  userId           String
+  signalId         String            @unique
+  userAccountId    String
+  userPositionId   String
+  userOrderId      String?
+  systemAccountId  String
+  systemPositionId String?
+  systemOrderId    String?
+  status           Mt5SyncLinkStatus @default(OPEN)
+  lastSyncedAt     DateTime          @default(now())
+  lastError        String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  signal Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@unique([userAccountId, userPositionId])
+  @@index([userId, status])
+  @@map("mt5_sync_links")
+}
+
+model Mt5LinkRequest {
+  id                String               @id @default(cuid())
+  userId            String
+  accountName       String
+  login             String
+  server            String
+  passwordEncrypted String               @db.Text
+  status            Mt5LinkRequestStatus @default(PENDING)
+  errorMessage      String?              @db.Text
+  metaApiAccountId  String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+  @@map("mt5_link_requests")
+}
+
+model CopyTrade {
+  id                 String          @id @default(cuid())
+  signalId           String          @unique
+  sourceUserId       String
+  sourceRank         Int
+  copyAccountId      String
+  symbol             String
+  direction          TradeDirection
+  volume             Decimal?        @db.Decimal(18, 8)
+  entryPrice         Decimal?        @db.Decimal(18, 8)
+  stopLoss           Decimal         @db.Decimal(18, 8)
+  takeProfit         Decimal         @db.Decimal(18, 8)
+  tp1Price           Decimal?        @db.Decimal(18, 8)
+  breakevenApplied   Boolean         @default(false)
+  metaApiOrderId     String?
+  metaApiPositionId  String?
+  status             CopyTradeStatus @default(PENDING)
+  profit             Decimal?        @db.Decimal(12, 2)
+  commissionCredited Boolean         @default(false)
+  notes              String?
+  executedAt         DateTime?
+  closedAt           DateTime?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  signal     Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  sourceUser User   @relation("CopyTradeSource", fields: [sourceUserId], references: [id], onDelete: Cascade)
+
+  @@index([sourceUserId])
+  @@index([copyAccountId])
+  @@index([status])
+  @@map("copy_trades")
+}
+
+/// Catalog of daily/weekly return products the product agent can pitch.
+model ReturnProduct {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String
+  cadence     String   @default("daily") // daily | weekly
+  yieldLabel  String?
+  ctaPath     String   @default("/invest")
+  /// How we detect enrollment: investor | depositor | investor_vip | auto_reinvest | manual
+  detectKey   String
+  active      Boolean  @default(true)
+  launchedAt  DateTime @default(now())
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  enrollments UserProductEnrollment[]
+  plans       ProductAgentPlan[]
+
+  @@index([active, launchedAt])
+  @@map("return_products")
+}
+
+model UserProductEnrollment {
+  id         String   @id @default(cuid())
+  userId     String
+  productId  String
+  source     String   @default("auto") // auto | manual
+  enrolledAt DateTime @default(now())
+  active     Boolean  @default(true)
+  updatedAt  DateTime @updatedAt
+
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product ReturnProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@index([productId, active])
+  @@map("user_product_enrollments")
+}
+
+/// Path visits for building usage profiles (from presence heartbeats).
+model UserPageEvent {
+  id     String   @id @default(cuid())
+  userId String
+  path   String
+  seenAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, seenAt])
+  @@index([seenAt])
+  @@map("user_page_events")
+}
+
+/// Living usage profile used by the product agent to personalize copy.
+model UserBehaviorProfile {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  profile   Json
+  rebuiltAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([rebuiltAt])
+  @@map("user_behavior_profiles")
+}
+
+/// Planned product-adoption emails (random 1/3/5 per week).
+model ProductAgentPlan {
+  id           String    @id @default(cuid())
+  userId       String
+  productId    String
+  weekStart    DateTime
+  plannedAt    DateTime
+  sendsPerWeek Int
+  subject      String
+  previewHtml  String
+  previewText  String
+  copyAngle    String
+  status       String    @default("PLANNED") // PLANNED | SENT | SKIPPED | CANCELLED | FAILED
+  detail       String?
+  sentAt       DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product ReturnProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([status, plannedAt])
+  @@index([userId, weekStart])
+  @@index([weekStart])
+  @@map("product_agent_plans")
+}
+
+/// Prepared models for on-chain investment contract indexing.
+/// Mock API does not write these yet — swap BlockchainService to persist when live.
+
+enum ChainNetworkKind {
+  ETHEREUM
+  BNB
+  BASE
+  POLYGON
+}
+
+enum ChainTxStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+enum ChainActivityType {
+  DEPOSIT
+  WITHDRAWAL
+  CLAIM
+  COMPOUND
+  REFERRAL_BONUS
+  OWNERSHIP_TRANSFER
+  PAUSED
+  UNPAUSED
+  EMERGENCY_WITHDRAWAL
+  WALLET_CONNECTED
+  WALLET_DISCONNECTED
+}
+
+model ChainNetwork {
+  id          String           @id @default(cuid())
+  kind        ChainNetworkKind @unique
+  label       String
+  chainId     Int
+  rpcUrl      String?
+  explorerUrl String
+  isTestnet   Boolean          @default(true)
+  active      Boolean          @default(true)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  contracts   ChainContract[]
+
+  @@map("chain_networks")
+}
+
+model ChainContract {
+  id              String   @id @default(cuid())
+  networkId       String
+  address         String
+  version         String   @default("1.0.0")
+  ownerAddress    String?
+  treasuryWallet  String?
+  reserveWallet   String?
+  emergencyWallet String?
+  paused          Boolean  @default(false)
+  symbol          String   @default("BNB")
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  network      ChainNetwork       @relation(fields: [networkId], references: [id], onDelete: Cascade)
+  transactions ChainTransaction[]
+  deposits     ChainDeposit[]
+  withdrawals  ChainWithdrawal[]
+  rewards      ChainReward[]
+  events       ChainEvent[]
+  settings     ChainSetting[]
+
+  @@unique([networkId, address])
+  @@index([active])
+  @@map("chain_contracts")
+}
+
+model ChainWallet {
+  id        String   @id @default(cuid())
+  userId    String?
+  address   String   @unique
+  provider  String?
+  label     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@map("chain_wallets")
+}
+
+model ChainTransaction {
+  id          String            @id @default(cuid())
+  contractId  String?
+  wallet      String
+  type        ChainActivityType
+  amount      Decimal           @db.Decimal(24, 8)
+  networkFee  Decimal           @default(0) @db.Decimal(24, 8)
+  blockNumber Int?
+  hash        String            @unique
+  status      ChainTxStatus     @default(PENDING)
+  occurredAt  DateTime          @default(now())
+  createdAt   DateTime          @default(now())
+
+  contract ChainContract? @relation(fields: [contractId], references: [id], onDelete: SetNull)
+
+  @@index([wallet, occurredAt])
+  @@index([type, status])
+  @@map("chain_transactions")
+}
+
+model ChainDeposit {
+  id         String        @id @default(cuid())
+  userId     String?
+  contractId String?
+  wallet     String
+  amount     Decimal       @db.Decimal(24, 8)
+  hash       String?       @unique
+  status     ChainTxStatus @default(PENDING)
+  createdAt  DateTime      @default(now())
+
+  user     User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  contract ChainContract? @relation(fields: [contractId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@map("chain_deposits")
+}
+
+model ChainWithdrawal {
+  id         String        @id @default(cuid())
+  userId     String?
+  contractId String?
+  wallet     String
+  amount     Decimal       @db.Decimal(24, 8)
+  hash       String?       @unique
+  status     ChainTxStatus @default(PENDING)
+  createdAt  DateTime      @default(now())
+
+  user     User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  contract ChainContract? @relation(fields: [contractId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@map("chain_withdrawals")
+}
+
+model ChainReward {
+  id         String        @id @default(cuid())
+  userId     String?
+  contractId String?
+  wallet     String
+  amount     Decimal       @db.Decimal(24, 8)
+  hash       String?       @unique
+  claimed    Boolean       @default(false)
+  status     ChainTxStatus @default(PENDING)
+  createdAt  DateTime      @default(now())
+
+  user     User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  contract ChainContract? @relation(fields: [contractId], references: [id], onDelete: SetNull)
+
+  @@index([userId, claimed])
+  @@map("chain_rewards")
+}
+
+/// Internal blockchain investment balance funded from the platform wallet.
+/// Principal and profit share one rolling five-day withdrawal lock.
+model ChainVaultPosition {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  principalBalance Decimal  @default(0) @db.Decimal(12, 2)
+  profitBalance    Decimal  @default(0) @db.Decimal(12, 2)
+  yieldPercent     Decimal  @default(10) @db.Decimal(5, 2)
+  lockedUntil      DateTime
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dailyCredits ChainDailyCredit[]
+
+  @@index([lockedUntil])
+  @@map("chain_vault_positions")
+}
+
+model ChainDailyCredit {
+  id           String   @id @default(cuid())
+  userId       String
+  positionId   String
+  amount       Decimal  @db.Decimal(12, 2)
+  yieldPercent Decimal  @db.Decimal(5, 2)
+  baseBalance  Decimal  @db.Decimal(12, 2)
+  creditDate   DateTime
+  createdAt    DateTime @default(now())
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  position ChainVaultPosition @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, creditDate])
+  @@index([positionId, creditDate])
+  @@map("chain_daily_credits")
+}
+
+model ChainEvent {
+  id              String            @id @default(cuid())
+  contractId      String?
+  name            String
+  type            ChainActivityType
+  transactionHash String
+  blockNumber     Int?
+  wallet          String?
+  payload         Json?
+  occurredAt      DateTime          @default(now())
+  createdAt       DateTime          @default(now())
+
+  contract ChainContract? @relation(fields: [contractId], references: [id], onDelete: SetNull)
+
+  @@index([occurredAt])
+  @@index([type])
+  @@map("chain_events")
+}
+
+model ChainSetting {
+  id         String   @id @default(cuid())
+  contractId String?
+  key        String
+  value      String
+  updatedAt  DateTime @updatedAt
+  createdAt  DateTime @default(now())
+
+  contract ChainContract? @relation(fields: [contractId], references: [id], onDelete: SetNull)
+
+  @@unique([contractId, key])
+  @@map("chain_settings")
+}
+
+model ChainNotification {
+  id        String   @id @default(cuid())
+  userId    String?
+  type      String
+  title     String
+  message   String
+  severity  String   @default("info")
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, read, createdAt])
+  @@map("chain_notifications")
+}
+
+model ChainReferral {
+  id         String   @id @default(cuid())
+  referrerId String?
+  refereeId  String?
+  amount     Decimal  @default(0) @db.Decimal(24, 8)
+  hash       String?
+  createdAt  DateTime @default(now())
+
+  referrer User? @relation("ChainReferralReferrer", fields: [referrerId], references: [id], onDelete: SetNull)
+  referee  User? @relation("ChainReferralReferee", fields: [refereeId], references: [id], onDelete: SetNull)
+
+  @@index([referrerId])
+  @@map("chain_referrals")
+}
+
+/// Cached aggregate metrics (blockchain is source of truth).
+model ChainContractStats {
+  id               String   @id @default(cuid())
+  contractAddress  String   @unique
+  contractBalance  Decimal  @default(0) @db.Decimal(24, 8)
+  tvl              Decimal  @default(0) @db.Decimal(24, 8)
+  totalDeposited   Decimal  @default(0) @db.Decimal(24, 8)
+  totalWithdrawn   Decimal  @default(0) @db.Decimal(24, 8)
+  totalUsers       Int      @default(0)
+  totalRewardsPaid Decimal  @default(0) @db.Decimal(24, 8)
+  depositsToday    Decimal  @default(0) @db.Decimal(24, 8)
+  withdrawalsToday Decimal  @default(0) @db.Decimal(24, 8)
+  ownerAddress     String?
+  paused           Boolean  @default(false)
+  version          String?
+  lastSyncedAt     DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("chain_contract_stats")
+}
+
+/// RPC / network health cache for admin dashboard.
+model ChainNetworkStatus {
+  id                     String    @id @default(cuid())
+  chainId                Int       @unique
+  label                  String
+  currentBlock           Int       @default(0)
+  gasPriceGwei           Decimal   @default(0) @db.Decimal(18, 8)
+  rpcStatus              String    @default("unknown") // healthy | degraded | down | unknown
+  avgConfirmationSeconds Decimal   @default(0) @db.Decimal(10, 2)
+  latestEventName        String?
+  latestEventAt          DateTime?
+  lastCheckedAt          DateTime  @default(now())
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  @@map("chain_network_status")
+}
+
+/// Waitlist for on-chain vault launch notifications.
+model ChainLaunchSubscription {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  userId    String?
+  source    String   @default("blockchain_banner")
+  notified  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([notified, createdAt])
+  @@map("chain_launch_subscriptions")
+}
+
+enum ChainContractEnrollmentStatus {
+  NOT_STARTED
+  TERMS_ACCEPTED
+  KYC_PENDING
+  KYC_REJECTED
+  APPROVED
+  ACTIVE
+}
+
+/// On-chain vault enrollment: terms → special KYC → approval → deposit/launch.
+model ChainContractEnrollment {
+  id                 String                        @id @default(cuid())
+  userId             String                        @unique
+  status             ChainContractEnrollmentStatus @default(NOT_STARTED)
+  termsAcceptedAt    DateTime?
+  country            String?
+  documentType       KycDocumentType?
+  documentNumber     String?
+  documentFrontUrl   String?
+  documentBackUrl    String?
+  livenessSelfieUrl  String?
+  livenessPassedAt   DateTime?
+  rejectionReason    String?
+  kycSubmittedAt     DateTime?
+  approvedAt         DateTime?
+  activatedAt        DateTime?
+  /// Snapshot of yield % at activation (15 or 20).
+  yieldPercent       Decimal?                      @db.Decimal(5, 2)
+  /// Withdraw fee on this contract (default 15%).
+  withdrawFeePercent Decimal                       @default(15) @db.Decimal(5, 2)
+  /// When set, user cannot restart blockchain enrollment until this time.
+  reapplyBlockedUntil DateTime?
+  createdAt          DateTime                      @default(now())
+  updatedAt          DateTime                      @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("chain_contract_enrollments")
+}

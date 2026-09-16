@@ -1,0 +1,146 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: #121a2e;
+  --color-foreground: #F8FAFC;
+  --color-muted: #94A3B8;
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-surface: rgba(22, 30, 48, 0.95);
+  --color-primary: #2563EB;
+  --color-success: #22C55E;
+  --color-danger: #EF4444;
+  --color-rank-gold: #FBBF24;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html.light {
+  --color-background: #F1F5F9;
+  --color-foreground: #0F172A;
+  --color-muted: #64748B;
+  --color-border: rgba(15, 23, 42, 0.1);
+  --color-surface: rgba(255, 255, 255, 0.92);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  min-height: 100vh;
+  transition: background-color 0.2s ease, color 0.2s ease;
+  overscroll-behavior-y: none;
+}
+
+/* Phones: no pinch-zoom layout stretch; allow vertical pan only */
+@media (max-width: 767px) {
+  html,
+  body {
+    touch-action: pan-x pan-y;
+    -ms-touch-action: pan-x pan-y;
+  }
+
+  input,
+  textarea,
+  select {
+    font-size: 16px; /* avoid iOS focus zoom */
+  }
+}
+
+.glass-card {
+  background: color-mix(in srgb, var(--color-surface) 60%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* Solid panels for dialogs — overrides .glass-card transparency */
+.modal-overlay {
+  background: rgba(0, 0, 0, 0.88);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.modal-panel {
+  background: #1a2438 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html.light .modal-panel {
+  background: #ffffff !important;
+}
+
+/* MT5 terminal shell — theme-aware surfaces, fixed buy/sell accent colors */
+.mt5-shell {
+  --mt5-blue: #4a9eff;
+  --mt5-red: #ff5252;
+  --mt5-text: var(--color-foreground);
+  --mt5-muted: var(--color-muted);
+  --mt5-bg: #121a2e;
+  --mt5-surface: #1a2438;
+  --mt5-divider: var(--color-border);
+  --mt5-row-hover: rgba(255, 255, 255, 0.05);
+}
+
+html.light .mt5-shell {
+  --mt5-text: #1a1a1a;
+  --mt5-muted: #6b7280;
+  --mt5-bg: #ffffff;
+  --mt5-surface: #f8f9fa;
+  --mt5-divider: rgba(0, 0, 0, 0.1);
+  --mt5-row-hover: rgba(0, 0, 0, 0.03);
+}
+
+/* Floating mobile bottom nav */
+.mobile-nav-dock {
+  --nav-dock-bg: #1a2438;
+  --nav-dock-border: rgba(255, 255, 255, 0.08);
+  --nav-dock-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --nav-dock-inactive: #94a3b8;
+}
+
+html.light .mobile-nav-dock {
+  --nav-dock-bg: #ffffff;
+  --nav-dock-border: rgba(15, 23, 42, 0.08);
+  --nav-dock-shadow: 0 8px 28px rgba(15, 23, 42, 0.12);
+  --nav-dock-inactive: #64748b;
+}
+
+/* Desktop floating sidebar — expand main padding when open */
+@media (min-width: 768px) {
+  body[data-sidebar-expanded="1"] .app-main {
+    padding-left: calc(16.5rem + 1.5rem);
+  }
+}
+
+.gradient-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+}
+
+.text-gradient {
+  background: linear-gradient(135deg, #2563EB 0%, #60A5FA 50%, #FBBF24 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 3s ease-in-out infinite;
+}

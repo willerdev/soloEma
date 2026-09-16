@@ -1,0 +1,998 @@
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Logger,
+  ForbiddenException,
+  ConflictException,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
+import { PayoutSource, WalletTxType } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { NowPaymentsService } from '../payments/nowpayments.service';
+import { ConfigService } from '@nestjs/config';
+import { ComplianceService } from '../compliance/compliance.service';
+import { NotificationService } from '../email/notification.service';
+import { resolvePayoutDestination } from '../common/payout.util';
+import { TP_REWARD_USD } from '../common/constants';
+import {
+  getPayoutRewardStatus,
+  getWeeklyTierPayoutsEnabled,
+  resolvePayoutRewardTier,
+} from './payout-reward-tier.util';
+import { ProfitShareService } from '../profit-share/profit-share.service';
+import {
+  isDemoLeaderboardUser,
+  maskDisplayNameForPublic,
+} from '../common/demo-user.util';
+import { WalletService } from '../wallet/wallet.service';
+import { FlutterwavePaymentsService } from '../flutterwave/flutterwave-payments.service';
+import { momoNetworkFromSavedWallet } from '../flutterwave/flutterwave.constants';
+import { isInvestorVipActive, VIP_AI_WITHDRAW_MIN_AGE_MS } from '../investor/investor-vip.util';
+import {
+  INSTANT_WITHDRAW_SAFETY_HOLD_ENABLED,
+  INSTANT_WITHDRAW_SAFETY_HOLD_MS,
+  instantWithdrawSafetyHoldRemainingMs,
+  isInstantTierWithdrawUser,
+} from '../investor/instant-withdraw-safety.util';
+
+@Injectable()
+export class PayoutService {
+  private readonly logger = new Logger(PayoutService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private nowPayments: NowPaymentsService,
+    private config: ConfigService,
+    private compliance: ComplianceService,
+    private notifications: NotificationService,
+    private profitShare: ProfitShareService,
+    @Inject(forwardRef(() => WalletService))
+    private walletService: WalletService,
+    private flutterwavePayments: FlutterwavePaymentsService,
+  ) {}
+
+  private ipnUrl() {
+    const base =
+      this.config.get<string>('API_PUBLIC_URL') ||
+      `http://localhost:${this.config.get('PORT') || 4000}`;
+    return `${base}/api/v1/payouts/ipn`;
+  }
+
+  async getRewardTier(userId: string) {
+    void userId;
+    return {
+      tierId: null,
+      label: 'Discontinued',
+      wins: 0,
+      windowSize: 10,
+      amountUsdt: 0,
+      weeklyPayoutsEnabled: false,
+    };
+  }
+
+  async isWeeklyTierPayoutsEnabled() {
+    return getWeeklyTierPayoutsEnabled(this.prisma);
+  }
+
+  async setWeeklyTierPayoutsEnabled(enabled: boolean) {
+    await this.prisma.platformConfig.upsert({
+      where: { id: 'default' },
+      create: { id: 'default', weeklyTierPayoutsEnabled: enabled },
+      update: { weeklyTierPayoutsEnabled: enabled },
+    });
+    return { weeklyTierPayoutsEnabled: enabled };
+  }
+
+  async calculateWeeklyPayouts(weekNumber: number, year: number) {
+    // Weekly tier payouts and profit-share weekly credits discontinued.
+    void weekNumber;
+    void year;
+    return [];
+  }
+
+  async requestPayout(
+    userId: string,
+    payoutId: string,
+    walletAddress?: string,
+  ) {
+    await this.compliance.requireKycForPayout(userId);
+
+    const profile = await this.prisma.userProfile.findUnique({
+      where: { userId },
+    });
+
+    const { destination, method } = resolvePayoutDestination(
+      profile,
+      walletAddress,
+    );
+
+    const payout = await this.prisma.payout.findFirst({
+      where: { id: payoutId, userId },
+    });
+    if (!payout) throw new NotFoundException('Payout not found');
+    if (payout.status !== 'PENDING') {
+      throw new BadRequestException('This payout is no longer open for requests');
+    }
+
+    return this.prisma.payout.update({
+      where: { id: payoutId },
+      data: {
+        walletAddress: destination,
+        payoutMethod: method,
+        requestedAt: new Date(),
+        status: 'PENDING',
+      },
+    });
+  }
+
+  async requestTpClaimPayout(
+    userId: string,
+    tpClaimId: string,
+    walletAddress?: string,
+  ) {
+    await this.compliance.requireKycForPayout(userId);
+
+    const claim = await this.prisma.tpClaim.findUnique({
+      where: { id: tpClaimId },
+      include: {
+        payout: true,
+        signal: { select: { signalId: true } },
+      },
+    });
+
+    if (!claim) throw new NotFoundException('TP claim not found');
+    if (claim.userId !== userId) {
+      throw new ForbiddenException('You can only request payout for your own claims');
+    }
+    if (claim.status !== 'APPROVED') {
+      throw new BadRequestException(
+        'Only approved TP claims can request a payout',
+      );
+    }
+
+    if (claim.payout) {
+      if (
+        claim.payout.status === 'PENDING' &&
+        !claim.payout.walletAddress
+      ) {
+        return this.requestPayout(userId, claim.payout.id, walletAddress);
+      }
+      throw new BadRequestException(
+        'A payout has already been requested for this TP claim',
+      );
+    }
+
+    const profile = await this.prisma.userProfile.findUnique({
+      where: { userId },
+    });
+
+    const { destination, method } = resolvePayoutDestination(
+      profile,
+      walletAddress,
+    );
+
+    const config = await this.prisma.platformConfig.findUnique({
+      where: { id: 'default' },
+    });
+    const reward = Number(config?.tpRewardUsd ?? TP_REWARD_USD);
+    const reviewed = claim.reviewedAt ?? new Date();
+    const { weekNumber, year } = this.isoWeekYear(reviewed);
+
+    const payout = await this.prisma.payout.create({
+      data: {
+        userId,
+        tpClaimId,
+        source: 'TP_REWARD',
+        virtualProfit: reward,
+        traderShare: reward,
+        platformShare: 0,
+        traderPercent: 100,
+        weekNumber,
+        year,
+        status: 'PENDING',
+        walletAddress: destination,
+        payoutMethod: method,
+        notes: `TP reward — ${claim.symbol} (${claim.signal.signalId})`,
+      },
+    });
+
+    return {
+      status: 'requested',
+      payoutId: payout.id,
+      amount: reward,
+      claimId: tpClaimId,
+      symbol: claim.symbol,
+    };
+  }
+
+  async requestProfitShareWithdrawal(userId: string, walletAddress?: string) {
+    void userId;
+    void walletAddress;
+    throw new BadRequestException(
+      'Profit share withdrawals have been discontinued. Contact support if you have an existing balance.',
+    );
+  }
+
+  private isoWeekYear(date: Date): { weekNumber: number; year: number } {
+    const d = new Date(
+      Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()),
+    );
+    const day = d.getUTCDay() || 7;
+    d.setUTCDate(d.getUTCDate() + 4 - day);
+    const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+    const weekNumber = Math.ceil(
+      ((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7,
+    );
+    return { weekNumber, year: d.getUTCFullYear() };
+  }
+
+  private walletTxTypeForPayout(source: PayoutSource): WalletTxType {
+    switch (source) {
+      case 'TP_REWARD':
+        return 'TP_REWARD';
+      case 'PROFIT_SHARE':
+        return 'PROFIT_SHARE';
+      case 'WEEKLY':
+        return 'TP_REWARD';
+      default:
+        return 'ADJUSTMENT';
+    }
+  }
+
+  async approveAndSendPayout(
+    payoutId: string,
+    adminId: string,
+    network = 'TRC20',
+    options?: {
+      settlement?: 'gateway' | 'external';
+      skipSafetyHold?: boolean;
+    },
+  ) {
+    const payout = await this.prisma.payout.findUnique({
+      where: { id: payoutId },
+    });
+    if (!payout) throw new NotFoundException('Payout not found');
+    if (payout.status !== 'PENDING') {
+      return {
+        payout,
+        verificationRequired: false,
+        alreadyProcessed: true,
+      };
+    }
+
+    await this.assertDepositorWithdrawSafetyHold(
+      payout.userId,
+      payout,
+      options?.skipSafetyHold,
+    );
+
+    const amount = Number(payout.traderShare);
+    const creditToWallet = payout.source !== 'DEPOSITOR';
+    const settlement = options?.settlement === 'external' ? 'external' : 'gateway';
+
+    if (creditToWallet) {
+      if (settlement === 'external') {
+        throw new BadRequestException(
+          'External settlement is only for wallet withdrawals sent to a payout destination',
+        );
+      }
+      const newBalance = await this.prisma.$transaction(async (tx) => {
+        const wallet = await tx.platformWallet.upsert({
+          where: { userId: payout.userId },
+          create: { userId: payout.userId },
+          update: {},
+        });
+        const balance = Number(wallet.availableBalance) + amount;
+
+        await tx.platformWallet.update({
+          where: { userId: payout.userId },
+          data: { availableBalance: balance },
+        });
+        await tx.walletTransaction.create({
+          data: {
+            userId: payout.userId,
+            amount,
+            type: this.walletTxTypeForPayout(payout.source),
+            referenceId: payoutId,
+            description: `Payout approved — $${amount.toFixed(2)} USDT credited to wallet`,
+            balanceAfter: balance,
+          },
+        });
+        await tx.payout.update({
+          where: { id: payoutId },
+          data: {
+            status: 'PAID',
+            processedAt: new Date(),
+            notes: `Approved by admin ${adminId} — $${amount.toFixed(2)} USDT credited to platform wallet`,
+          },
+        });
+
+        return balance;
+      });
+
+      this.notifications.payoutCreditedToWallet(payout.userId, {
+        amount,
+        balance: newBalance,
+        weekNumber: payout.weekNumber,
+        year: payout.year,
+        source: payout.source,
+      });
+
+      const updated = await this.prisma.payout.findUniqueOrThrow({
+        where: { id: payoutId },
+      });
+
+      return {
+        payout: updated,
+        verificationRequired: false,
+        creditedToWallet: true,
+        walletBalance: newBalance,
+      };
+    }
+
+    return this.sendExternalWalletPayout(payout, adminId, settlement);
+  }
+
+  private async sendExternalWalletPayout(
+    payout: {
+      id: string;
+      userId: string;
+      traderShare: unknown;
+      walletAddress: string | null;
+      payoutMethod: string | null;
+      weekNumber: number;
+      year: number;
+      notes: string | null;
+      source: PayoutSource;
+    },
+    adminId: string,
+    settlement: 'gateway' | 'external' = 'gateway',
+  ) {
+    const amount = Number(payout.traderShare);
+    const destination = payout.walletAddress?.trim();
+    if (!destination) {
+      throw new BadRequestException(
+        'Cannot approve wallet withdrawal — payout destination is missing',
+      );
+    }
+
+    if (settlement === 'external') {
+      const updated = await this.prisma.payout.update({
+        where: { id: payout.id },
+        data: {
+          status: 'PAID',
+          processedAt: new Date(),
+          notes: `Confirmed by admin ${adminId}`,
+        },
+      });
+
+      this.notifications.payoutApproved(payout.userId, {
+        amount,
+        walletAddress: destination,
+        weekNumber: payout.weekNumber,
+        year: payout.year,
+      });
+
+      return {
+        payout: updated,
+        verificationRequired: false,
+        creditedToWallet: false,
+        settlement: 'external' as const,
+        message: 'Payout confirmed.',
+      };
+    }
+
+    const isMobileMoney = payout.payoutMethod === 'MOBILE_MONEY';
+
+    if (isMobileMoney) {
+      const p2p = await this.prisma.momoP2pWithdrawal.findUnique({
+        where: { payoutId: payout.id },
+      });
+      if (p2p) {
+        if (p2p.status === 'COMPLETED') {
+          return {
+            payout,
+            verificationRequired: false,
+            creditedToWallet: false,
+            settlement: 'momo_p2p' as const,
+            message: 'MoMo P2P already completed.',
+          };
+        }
+        throw new BadRequestException(
+          'This is a MoMo P2P withdrawal — send UGX manually, then confirm with POST /admin/momo-p2p/:id/confirm-sent (do not use Flutterwave approve).',
+        );
+      }
+
+      if (this.flutterwavePayments.getPublicConfig().enabled) {
+        const user = await this.prisma.user.findUnique({
+          where: { id: payout.userId },
+          select: { displayName: true },
+        });
+        const phone = destination.replace(/\D/g, "").slice(-12);
+        const networkMatch = payout.notes?.match(/\(MOMO_[A-Z]+\)/)?.[0];
+        const momoNetwork = networkMatch
+          ? momoNetworkFromSavedWallet(networkMatch.replace(/[()]/g, ""))
+          : "MTN";
+
+        try {
+          const sent = await this.flutterwavePayments.sendMomoPayout({
+            payoutId: payout.id,
+            amountUsd: amount,
+            network: momoNetwork,
+            phoneNumber: phone,
+            recipientName: user?.displayName?.trim() || 'Trader',
+          });
+
+          const updated = await this.prisma.payout.update({
+            where: { id: payout.id },
+            data: {
+              gatewayPayoutId: sent.transferId,
+              status: 'APPROVED',
+              notes: `${payout.notes ?? ''} — Flutterwave transfer ${sent.transferId} (admin ${adminId})`.trim(),
+            },
+          });
+
+          this.notifications.payoutApproved(payout.userId, {
+            amount,
+            walletAddress: destination,
+            weekNumber: payout.weekNumber,
+            year: payout.year,
+          });
+
+          return {
+            payout: updated,
+            verificationRequired: false,
+            creditedToWallet: false,
+            gatewayPayoutId: sent.transferId,
+            message:
+              'MoMo payout queued on Flutterwave. Funds will arrive after the customer approves on their phone if required.',
+          };
+        } catch (err) {
+          const message =
+            err instanceof Error ? err.message : 'Flutterwave MoMo payout failed';
+          this.logger.error(`Flutterwave payout failed for ${payout.id}: ${message}`);
+          throw new BadRequestException(
+            `Could not queue MoMo payout on Flutterwave: ${message}`,
+          );
+        }
+      }
+
+      const updated = await this.prisma.payout.update({
+        where: { id: payout.id },
+        data: {
+          status: 'PAID',
+          processedAt: new Date(),
+          notes: `Confirmed by admin ${adminId} — mobile money (manual transfer)`,
+        },
+      });
+
+      this.notifications.payoutApproved(payout.userId, {
+        amount,
+        walletAddress: destination,
+        weekNumber: payout.weekNumber,
+        year: payout.year,
+      });
+
+      return {
+        payout: updated,
+        verificationRequired: false,
+        creditedToWallet: false,
+      };
+    }
+
+    if (!this.nowPayments.isConfigured) {
+      throw new BadRequestException(
+        'NOWPayments is not configured — set NOWPAYMENTS_API_KEY before approving wallet withdrawals',
+      );
+    }
+
+    if (!this.nowPayments.isPayoutConfigured) {
+      const status = this.nowPayments.getPayoutConfigStatus();
+      const missing = [
+        !status.payoutEmailSet ? 'NOWPAYMENTS_PAYOUT_EMAIL' : null,
+        !status.payoutPasswordSet ? 'NOWPAYMENTS_PAYOUT_PASSWORD' : null,
+      ].filter(Boolean);
+      throw new BadRequestException(
+        `NOWPayments payout login is not configured on traders-api — set ${missing.join(
+          ' and ',
+        )} on the Render backend service (not the frontend), then Manual Deploy / restart`,
+      );
+    }
+
+    const currency = this.nowPayments.mapNetworkToCurrency('TRC20');
+    let result: { id: string };
+    try {
+      result = await this.nowPayments.createPayout({
+        address: destination,
+        amount,
+        currency,
+        ipnCallbackUrl: this.ipnUrl(),
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'NOWPayments payout failed';
+      this.logger.error(
+        `NOWPayments payout failed for ${payout.id}: ${message}`,
+      );
+      throw new BadRequestException(
+        `Could not queue payout on NOWPayments: ${message}`,
+      );
+    }
+
+    const updated = await this.prisma.payout.update({
+      where: { id: payout.id },
+      data: {
+        gatewayPayoutId: result.id,
+        status: 'APPROVED',
+        notes: `${payout.notes ?? ''} — NOWPayments batch ${result.id} (admin ${adminId})`.trim(),
+      },
+    });
+
+    this.notifications.payoutApproved(payout.userId, {
+      amount,
+      walletAddress: destination,
+      weekNumber: payout.weekNumber,
+      year: payout.year,
+    });
+
+    return {
+      payout: updated,
+      verificationRequired: false,
+      gatewayPayoutId: result.id,
+      creditedToWallet: false,
+      message:
+        'Payout queued on NOWPayments — funds will be sent to the destination wallet shortly.',
+    };
+  }
+
+  async verifyGatewayPayout(
+    payoutId: string,
+    verificationCode: string,
+    adminId: string,
+  ) {
+    const code = verificationCode?.trim();
+    if (!code) {
+      throw new BadRequestException('NOWPayments 2FA verification code is required');
+    }
+
+    const payout = await this.prisma.payout.findUnique({
+      where: { id: payoutId },
+    });
+    if (!payout) throw new NotFoundException('Payout not found');
+    if (!payout.gatewayPayoutId) {
+      throw new BadRequestException(
+        'This payout has no pending NOWPayments batch — approve it first',
+      );
+    }
+
+    await this.nowPayments.verifyPayout(payout.gatewayPayoutId, code);
+
+    const updated = await this.prisma.payout.update({
+      where: { id: payoutId },
+      data: {
+        notes: `${payout.notes ?? ''} — verified by admin ${adminId}`.trim(),
+      },
+    });
+
+    return {
+      payout: updated,
+      message:
+        'Payout verified. NOWPayments will send USDT to the trader wallet shortly.',
+    };
+  }
+
+  async approvePayout(payoutId: string, adminId: string) {
+    return this.approveAndSendPayout(payoutId, adminId);
+  }
+
+  /**
+   * VIP support-agent path: approve+send the user's own PENDING wallet withdrawal
+   * after it has been pending at least 30 minutes.
+   */
+  async approveVipAiWithdrawal(userId: string, payoutId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        investorVipActive: true,
+        investorVipExpiresAt: true,
+        kyc: { select: { status: true } },
+      },
+    });
+    if (!isInvestorVipActive(user ?? {})) {
+      throw new ForbiddenException(
+        'Investor VIP is required for AI withdrawal approval',
+      );
+    }
+
+    const config = await this.prisma.platformConfig.findUnique({
+      where: { id: 'default' },
+    });
+    if (config?.requireKycForPayouts !== false) {
+      const cleared =
+        Boolean(user?.kyc?.status === 'APPROVED') ||
+        (await this.compliance.isWithdrawKycExempt(userId));
+      if (!cleared) {
+        throw new BadRequestException(
+          'Cannot approve withdrawal — KYC is not verified',
+        );
+      }
+    }
+
+    const payout = await this.prisma.payout.findUnique({
+      where: { id: payoutId },
+    });
+    if (!payout || payout.userId !== userId) {
+      throw new NotFoundException('Withdrawal not found');
+    }
+    if (payout.source !== 'DEPOSITOR') {
+      throw new BadRequestException(
+        'AI can only approve platform wallet withdrawals',
+      );
+    }
+    if (payout.status !== 'PENDING') {
+      throw new BadRequestException(
+        `Withdrawal is ${payout.status}, not PENDING`,
+      );
+    }
+
+    const ageMs = Date.now() - payout.requestedAt.getTime();
+    const minAgeMs = INSTANT_WITHDRAW_SAFETY_HOLD_ENABLED
+      ? INSTANT_WITHDRAW_SAFETY_HOLD_MS
+      : VIP_AI_WITHDRAW_MIN_AGE_MS;
+    if (ageMs < minAgeMs) {
+      const waitMin = Math.ceil((minAgeMs - ageMs) / 60000);
+      const label = INSTANT_WITHDRAW_SAFETY_HOLD_ENABLED
+        ? `${Math.round(INSTANT_WITHDRAW_SAFETY_HOLD_MS / (60 * 60 * 1000))} hours`
+        : '30 minutes';
+      throw new BadRequestException(
+        `Withdrawal must wait ${label} before AI approval — about ${waitMin} minute(s) left`,
+      );
+    }
+
+    const agentId = `ai_vip_${userId}`;
+    const result = await this.approveAndSendPayout(payoutId, agentId);
+    this.logger.log(
+      `VIP AI approved wallet withdrawal ${payoutId} for user ${userId}`,
+    );
+    const message =
+      'message' in result && typeof result.message === 'string'
+        ? result.message
+        : 'Withdrawal approved — funds are being sent to your saved wallet.';
+    return {
+      payoutId,
+      status:
+        result &&
+        typeof result === 'object' &&
+        'payout' in result &&
+        result.payout &&
+        typeof result.payout === 'object' &&
+        'status' in result.payout
+          ? String(result.payout.status)
+          : 'APPROVED',
+      amountUsdt: Number(payout.traderShare),
+      gatewayPayoutId:
+        'gatewayPayoutId' in result ? result.gatewayPayoutId : undefined,
+      message,
+    };
+  }
+
+  async refundWalletWithdrawal(
+    payoutId: string,
+    adminId: string,
+    reason?: string,
+  ) {
+    const payout = await this.prisma.payout.findUnique({
+      where: { id: payoutId },
+    });
+    if (!payout) throw new NotFoundException('Payout not found');
+    if (payout.source !== 'DEPOSITOR') {
+      throw new BadRequestException(
+        'Only wallet withdrawal payouts can be refunded to the platform wallet',
+      );
+    }
+    if (payout.status === 'REJECTED') {
+      throw new BadRequestException('This payout was already refunded');
+    }
+
+    const refundRef = `refund_${payoutId}`;
+    const existingRefund = await this.prisma.walletTransaction.findFirst({
+      where: { referenceId: refundRef },
+    });
+    if (existingRefund) {
+      throw new BadRequestException('This payout was already refunded');
+    }
+
+    const amount = Number(payout.virtualProfit);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException('Invalid payout amount');
+    }
+
+    const note =
+      reason?.trim() ||
+      `Refund — wallet withdrawal not sent ($${amount.toFixed(2)} USDT)`;
+
+    const { balance } = await this.walletService.creditBalance(
+      payout.userId,
+      amount,
+      'ADJUSTMENT',
+      note,
+      refundRef,
+    );
+
+    const updated = await this.prisma.payout.update({
+      where: { id: payoutId },
+      data: {
+        status: 'REJECTED',
+        processedAt: new Date(),
+        notes: `${payout.notes ?? ''} — refunded by admin ${adminId}: ${note}`.trim(),
+      },
+    });
+
+    this.notifications.walletAdminCredit(payout.userId, { amount, balance });
+
+    return {
+      payout: updated,
+      amount,
+      balance,
+      message: `Refunded $${amount.toFixed(2)} USDT to the user's platform wallet`,
+    };
+  }
+
+  private async assertDepositorWithdrawSafetyHold(
+    userId: string,
+    payout: { source: PayoutSource; requestedAt: Date },
+    skip = false,
+  ) {
+    if (skip) return;
+    if (payout.source !== 'DEPOSITOR' || !INSTANT_WITHDRAW_SAFETY_HOLD_ENABLED) {
+      return;
+    }
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        instantWithdraw: true,
+        investorVvipActive: true,
+        investorVipActive: true,
+        investorVipExpiresAt: true,
+      },
+    });
+    const instantTier = isInstantTierWithdrawUser(user);
+    const vipActive = isInvestorVipActive(user ?? {});
+    if (!instantTier && !vipActive) return;
+
+    const remaining = instantWithdrawSafetyHoldRemainingMs(payout.requestedAt);
+    if (remaining <= 0) return;
+
+    const hoursLeft = Math.ceil(remaining / (60 * 60 * 1000));
+    const holdHours = Math.round(INSTANT_WITHDRAW_SAFETY_HOLD_MS / (60 * 60 * 1000));
+    throw new BadRequestException(
+      `Withdrawal safety hold — instant/VIP wallet withdrawals require ${holdHours}h before approval (${hoursLeft}h remaining)`,
+    );
+  }
+
+  async getPayoutHistory(userId: string) {
+    return this.prisma.payout.findMany({
+      where: { userId },
+      orderBy: { requestedAt: 'desc' },
+    });
+  }
+
+  async listPendingWalletWithdrawals(userId: string) {
+    const rows = await this.prisma.payout.findMany({
+      where: { userId, source: 'DEPOSITOR', status: 'PENDING' },
+      orderBy: { requestedAt: 'desc' },
+      select: {
+        id: true,
+        virtualProfit: true,
+        traderShare: true,
+        status: true,
+        payoutMethod: true,
+        walletAddress: true,
+        requestedAt: true,
+        scheduledApproveAt: true,
+      },
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      grossAmount: Number(row.virtualProfit),
+      netAmount: Number(row.traderShare),
+      status: row.status,
+      payoutMethod: row.payoutMethod,
+      walletAddress: row.walletAddress,
+      requestedAt: row.requestedAt.toISOString(),
+      scheduledApproveAt: row.scheduledApproveAt?.toISOString() ?? null,
+    }));
+  }
+
+  async cancelPendingWithdrawalByUser(userId: string, payoutId: string) {
+    const payout = await this.prisma.payout.findFirst({
+      where: { id: payoutId, userId },
+    });
+    if (!payout) {
+      throw new NotFoundException('Withdrawal not found');
+    }
+    if (payout.source !== 'DEPOSITOR') {
+      throw new BadRequestException(
+        'Only platform wallet withdrawals can be cancelled here',
+      );
+    }
+    if (payout.status === 'APPROVED') {
+      throw new BadRequestException(
+        'This withdrawal is already being processed and cannot be cancelled',
+      );
+    }
+    if (payout.status === 'PAID') {
+      throw new BadRequestException('This withdrawal has already been paid');
+    }
+    if (payout.status === 'REJECTED') {
+      throw new BadRequestException('This withdrawal was already cancelled');
+    }
+    if (payout.status !== 'PENDING') {
+      throw new BadRequestException('This withdrawal cannot be cancelled');
+    }
+
+    const refundRef = `refund_${payoutId}`;
+    const existingRefund = await this.prisma.walletTransaction.findFirst({
+      where: { referenceId: refundRef },
+    });
+    if (existingRefund) {
+      throw new BadRequestException('This withdrawal was already refunded');
+    }
+
+    const amount = Number(payout.virtualProfit);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException('Invalid withdrawal amount');
+    }
+
+    const note = `Refund — pending withdrawal cancelled ($${amount.toFixed(2)} USDT)`;
+
+    const balance = await this.prisma.$transaction(async (tx) => {
+      const claim = await tx.payout.updateMany({
+        where: { id: payoutId, userId, source: 'DEPOSITOR', status: 'PENDING' },
+        data: {
+          status: 'REJECTED',
+          processedAt: new Date(),
+          scheduledApproveAt: null,
+          notes: `${payout.notes ?? ''} — cancelled by user: ${note}`.trim(),
+        },
+      });
+      if (claim.count !== 1) {
+        throw new ConflictException(
+          'Withdrawal status changed — refresh and try again',
+        );
+      }
+
+      const wallet = await tx.platformWallet.upsert({
+        where: { userId },
+        create: { userId },
+        update: {},
+      });
+      const newBalance =
+        Math.round((Number(wallet.availableBalance) + amount) * 100) / 100;
+
+      await tx.platformWallet.update({
+        where: { userId },
+        data: { availableBalance: newBalance },
+      });
+      await tx.walletTransaction.create({
+        data: {
+          userId,
+          amount,
+          type: 'ADJUSTMENT',
+          description: note,
+          referenceId: refundRef,
+          balanceAfter: newBalance,
+        },
+      });
+
+      const momo = await tx.momoP2pWithdrawal.findUnique({
+        where: { payoutId },
+      });
+      if (momo && momo.status !== 'COMPLETED' && momo.status !== 'CANCELLED') {
+        await tx.momoP2pWithdrawal.update({
+          where: { id: momo.id },
+          data: { status: 'CANCELLED' },
+        });
+      }
+
+      return newBalance;
+    });
+
+    await this.walletService.reverseLoanWithdraw(userId, amount);
+
+    this.notifications.walletWithdrawalCancelled(userId, { amount, balance });
+
+    return {
+      payoutId,
+      amount,
+      balance,
+      message: `Withdrawal cancelled — $${amount.toFixed(2)} USDT returned to your wallet`,
+    };
+  }
+
+  async getRecentPublicPayouts(limit = 12) {
+    const take = Math.min(Math.max(limit, 1), 30);
+    const rows = await this.prisma.payout.findMany({
+      where: { status: 'PAID' },
+      orderBy: [{ processedAt: 'desc' }, { requestedAt: 'desc' }],
+      take: take * 2,
+      include: {
+        user: {
+          select: {
+            displayName: true,
+            email: true,
+            virtualAccount: { select: { tier: true } },
+          },
+        },
+      },
+    });
+
+    const items = rows
+      .filter((row) => !isDemoLeaderboardUser(row.user.email))
+      .slice(0, take)
+      .map((row) => ({
+        displayName: maskDisplayNameForPublic(row.user.displayName),
+        amount: Number(row.traderShare),
+        tier: row.user.virtualAccount?.tier ?? 'BRONZE',
+        source: row.source,
+        rewardTier: row.rewardTier,
+        weekNumber: row.weekNumber,
+        year: row.year,
+        paidAt:
+          row.processedAt?.toISOString() ??
+          row.requestedAt.toISOString(),
+      }));
+
+    const totalPaidAgg = await this.prisma.payout.aggregate({
+      where: { status: 'PAID' },
+      _sum: { traderShare: true },
+      _count: true,
+    });
+
+    return {
+      items,
+      totalPaid: Number(totalPaidAgg._sum.traderShare ?? 0),
+      payoutCount: totalPaidAgg._count,
+      refreshedAt: new Date().toISOString(),
+    };
+  }
+
+  async handlePayoutIpn(body: Record<string, unknown>) {
+    this.logger.log(`Payout IPN received: ${JSON.stringify(body).slice(0, 400)}`);
+
+    const payoutId =
+      typeof body.id === 'string'
+        ? body.id
+        : typeof body.payout_id === 'string'
+          ? body.payout_id
+          : undefined;
+    const status =
+      typeof body.status === 'string'
+        ? body.status.toLowerCase()
+        : typeof body.payment_status === 'string'
+          ? body.payment_status.toLowerCase()
+          : '';
+
+    if (payoutId) {
+      const payout = await this.prisma.payout.findFirst({
+        where: { gatewayPayoutId: payoutId },
+      });
+      if (payout && ['finished', 'confirmed', 'sent', 'completed'].includes(status)) {
+        const wasPaid = payout.status === 'PAID';
+        await this.prisma.payout.update({
+          where: { id: payout.id },
+          data: { status: 'PAID', processedAt: new Date() },
+        });
+        if (!wasPaid && payout.source === 'DEPOSITOR') {
+          this.logger.log(
+            `Wallet withdrawal ${payout.id} marked PAID via NOWPayments IPN`,
+          );
+        }
+      }
+    }
+
+    return { ok: true };
+  }
+}

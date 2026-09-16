@@ -1,0 +1,46 @@
+import { Module, forwardRef } from '@nestjs/common';
+import { AdminController } from './admin.controller';
+import { AdminService } from './admin.service';
+import { PayoutsModule } from '../payouts/payouts.module';
+import { AnalyticsModule } from '../analytics/analytics.module';
+import { TpClaimsModule } from '../tp-claims/tp-claims.module';
+import { PaymentsModule } from '../payments/payments.module';
+import { SignalHubModule } from '../signals/signal-hub.module';
+import { SignalsModule } from '../signals/signals.module';
+import { AuthModule } from '../auth/auth.module';
+import { MessagesModule } from '../messages/messages.module';
+import { UploadsModule } from '../uploads/uploads.module';
+import { MetaApiModule } from '../metaapi/metaapi.module';
+import { PresenceModule } from '../presence/presence.module';
+import { WalletModule } from '../wallet/wallet.module';
+import { InvestorModule } from '../investor/investor.module';
+import { UnitrustModule } from '../unitrust/unitrust.module';
+import { LoansModule } from '../loans/loans.module';
+import { CashAgentsModule } from '../cash-agents/cash-agents.module';
+import { AdminPermissionGuard } from '../auth/guards/admin-permission.guard';
+import { BlockchainModule } from '../blockchain/blockchain.module';
+
+@Module({
+  imports: [
+    PayoutsModule,
+    AnalyticsModule,
+    TpClaimsModule,
+    PaymentsModule,
+    SignalHubModule,
+    SignalsModule,
+    MetaApiModule,
+    AuthModule,
+    MessagesModule,
+    UploadsModule,
+    PresenceModule,
+    WalletModule,
+    forwardRef(() => InvestorModule),
+    UnitrustModule,
+    LoansModule,
+    CashAgentsModule,
+    BlockchainModule,
+  ],
+  controllers: [AdminController],
+  providers: [AdminService, AdminPermissionGuard],
+})
+export class AdminModule {}

@@ -1,0 +1,50 @@
+export const TIER_BALANCES = {
+  BRONZE: 1000,
+  SILVER: 2500,
+  GOLD: 5000,
+  DIAMOND: 10000,
+  ELITE: 25000,
+} as const;
+
+export const RR_BONUS: Record<string, number> = {
+  '2': 5,
+  '3': 10,
+  '4': 15,
+};
+
+export const WIN_POINTS = 10;
+export const LOSS_POINTS = -5;
+export const DUPLICATE_THRESHOLD = 0.9;
+export const ENTRY_TOLERANCE_PERCENT = 0.2;
+export const DUPLICATE_ENTRY_PIP_TOLERANCE = 10;
+export const DUPLICATE_LOOKBACK_MINUTES = 50;
+export const TRADER_PAYOUT_PERCENT = 40;
+export const PLATFORM_PAYOUT_PERCENT = 60;
+export const STARTING_BALANCE = 1000;
+export const RISK_PERCENT = 5;
+export const MAX_RISK_PER_TRADE = 50;
+export const REGISTRATION_FEE_USDT = 5;
+/** Deducted from every platform wallet withdrawal before on-chain payout. */
+export const WALLET_WITHDRAWAL_FEE_USD = 3;
+/** Platform fee on auto-reinvested investor daily earnings (percent of full daily return). */
+export const INVESTOR_AUTO_REINVEST_FEE_PERCENT = 10;
+/** Platform fee on user self-serve wallet → Smart Invest reinvest (percent of gross amount). */
+export const INVESTOR_SELF_REINVEST_FEE_PERCENT = 30;
+export const TP_REWARD_USD = 5;
+export const PROFIT_SHARE_FEE_USDT = 50;
+export const PROFIT_SHARE_PERCENT = 50;
+export const PROFIT_SHARE_WITHDRAW_THRESHOLD_PERCENT = 40;
+
+/** Max broker/Hub attempts to move stop to breakeven when price initially rejects it. */
+export const MAX_BREAKEVEN_RETRIES = 10;
+export const PROMO_DEFAULT_VALIDITY_DAYS = 7;
+
+/** Open setups older than this are auto-invalidated/archived. */
+export const SETUP_MAX_AGE_HOURS = 24;
+export const SETUP_MAX_AGE_MS = SETUP_MAX_AGE_HOURS * 60 * 60 * 1000;
+
+export const STREAK_THRESHOLDS = {
+  WARNING: 3,
+  SCORE_REDUCTION: 5,
+  ACCOUNT_RESET: 10,
+} as const;

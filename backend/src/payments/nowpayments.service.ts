@@ -1,0 +1,443 @@
+import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { createHmac } from 'crypto';
+
+const NETWORK_CURRENCY: Record<string, string> = {
+  TRC20: 'usdttrc20',
+  BEP20: 'usdtbsc',
+  ERC20: 'usdterc20',
+};
+
+export class NowPaymentsApiError extends Error {
+  constructor(
+    message: string,
+    readonly statusCode?: number,
+    readonly details?: unknown,
+  ) {
+    super(message);
+    this.name = 'NowPaymentsApiError';
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+@Injectable()
+export class NowPaymentsService {
+  private readonly logger = new Logger(NowPaymentsService.name);
+  private readonly apiUrl: string;
+  private readonly apiKey: string;
+  private payoutToken: string | null = null;
+  private payoutTokenExpiry = 0;
+  private readonly statusCache = new Map<
+    string,
+    { at: number; data: Awaited<ReturnType<NowPaymentsService['fetchPaymentStatus']>> }
+  >();
+  private static readonly STATUS_TTL_MS = 45_000;
+  private static readonly MAX_429_RETRIES = 3;
+
+  constructor(private config: ConfigService) {
+    this.apiUrl =
+      this.config.get<string>('NOWPAYMENTS_API_URL') ||
+      'https://api.nowpayments.io/v1';
+    this.apiKey = this.config.get<string>('NOWPAYMENTS_API_KEY') || '';
+    if (this.apiKey) {
+      this.logger.log(
+        `NOWPayments API key loaded · payout email ${
+          this.payoutEmail() ? 'set' : 'MISSING'
+        } · payout password ${this.payoutPassword() ? 'set' : 'MISSING'}`,
+      );
+    }
+  }
+
+  get isConfigured(): boolean {
+    return Boolean(this.apiKey);
+  }
+
+  get isPayoutConfigured(): boolean {
+    return (
+      this.isConfigured &&
+      Boolean(this.payoutEmail()) &&
+      Boolean(this.payoutPassword())
+    );
+  }
+
+  /** Safe diagnostics for admin UI — never returns secret values. */
+  getPayoutConfigStatus() {
+    const emailSet = Boolean(this.payoutEmail());
+    const passwordSet = Boolean(this.payoutPassword());
+    return {
+      apiKeySet: this.isConfigured,
+      payoutEmailSet: emailSet,
+      payoutPasswordSet: passwordSet,
+      payoutConfigured: this.isConfigured && emailSet && passwordSet,
+    };
+  }
+
+  /**
+   * Read env from Nest ConfigService or process.env.
+   * Accepts aliases and strips wrapping quotes (common Render paste mistake).
+   */
+  private envValue(...keys: string[]): string {
+    for (const key of keys) {
+      const raw =
+        this.config.get<string>(key) ?? process.env[key] ?? '';
+      const value = String(raw)
+        .trim()
+        .replace(/^['"]+|['"]+$/g, '')
+        .trim();
+      if (value) return value;
+    }
+    return '';
+  }
+
+  private payoutEmail(): string {
+    return this.envValue(
+      'NOWPAYMENTS_PAYOUT_EMAIL',
+      'NOW_PAYMENTS_PAYOUT_EMAIL',
+      'NOWPAYMENTS_EMAIL',
+      'NOWPAYMENTS_LOGIN_EMAIL',
+      'NOWPAYMENTS_ACCOUNT_EMAIL',
+    );
+  }
+
+  private payoutPassword(): string {
+    return this.envValue(
+      'NOWPAYMENTS_PAYOUT_PASSWORD',
+      'NOW_PAYMENTS_PAYOUT_PASSWORD',
+      'NOWPAYMENTS_PASSWORD',
+      'NOWPAYMENTS_LOGIN_PASSWORD',
+      'NOWPAYMENTS_ACCOUNT_PASSWORD',
+    );
+  }
+
+  private headers(extra: Record<string, string> = {}) {
+    return {
+      'x-api-key': this.apiKey,
+      'Content-Type': 'application/json',
+      ...extra,
+    };
+  }
+
+  private async requestOnce<T>(
+    path: string,
+    options: RequestInit = {},
+  ): Promise<T> {
+    let res: Response;
+    try {
+      res = await fetch(`${this.apiUrl}${path}`, options);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Network request failed';
+      this.logger.error(`NOWPayments network error ${path}: ${message}`);
+      throw new NowPaymentsApiError(
+        'Could not reach NOWPayments — try again in a moment',
+        503,
+      );
+    }
+
+    const body = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      const payload = body as {
+        message?: string;
+        status?: boolean;
+        code?: string;
+      };
+      let message =
+        payload.message ||
+        payload.code ||
+        `NOWPayments request failed (${res.status})`;
+
+      if (res.status === 429) {
+        message =
+          'Payment service is temporarily busy — wait 30 seconds and try again';
+      }
+
+      this.logger.error(`NOWPayments error ${path}: ${JSON.stringify(body)}`);
+      throw new NowPaymentsApiError(message, res.status, body);
+    }
+
+    return body as T;
+  }
+
+  private async request<T>(
+    path: string,
+    options: RequestInit = {},
+  ): Promise<T> {
+    let lastError: NowPaymentsApiError | undefined;
+
+    for (let attempt = 0; attempt <= NowPaymentsService.MAX_429_RETRIES; attempt++) {
+      try {
+        return await this.requestOnce<T>(path, options);
+      } catch (err) {
+        if (!(err instanceof NowPaymentsApiError)) throw err;
+        lastError = err;
+        if (err.statusCode !== 429 || attempt >= NowPaymentsService.MAX_429_RETRIES) {
+          throw err;
+        }
+        const waitMs = 1500 * (attempt + 1);
+        this.logger.warn(
+          `NOWPayments rate limited on ${path} — retry ${attempt + 1}/${NowPaymentsService.MAX_429_RETRIES} in ${waitMs}ms`,
+        );
+        await sleep(waitMs);
+      }
+    }
+
+    throw lastError ?? new NowPaymentsApiError('NOWPayments request failed', 429);
+  }
+
+  private normalizeAmount(amount: number): number {
+    const rounded = Math.round(amount * 100) / 100;
+    if (!Number.isFinite(rounded) || rounded <= 0) {
+      throw new HttpException(
+        'Payment amount must be greater than zero',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    return rounded;
+  }
+
+  mapNetworkToCurrency(network: string): string {
+    return NETWORK_CURRENCY[network.toUpperCase()] || 'usdttrc20';
+  }
+
+  async getMinPaymentAmount(
+    network: string,
+    opts?: { fiatEquivalent?: string },
+  ): Promise<{ minAmount: number; fiatEquivalent?: number }> {
+    const currency = this.mapNetworkToCurrency(network);
+    const params = new URLSearchParams({
+      currency_from: currency,
+      currency_to: currency,
+      is_fixed_rate: 'false',
+      is_fee_paid_by_user: 'false',
+    });
+    if (opts?.fiatEquivalent) {
+      params.set('fiat_equivalent', opts.fiatEquivalent);
+    }
+
+    const result = await this.request<{
+      min_amount?: number;
+      fiat_equivalent?: number;
+    }>(`/min-amount?${params.toString()}`, { headers: this.headers() });
+
+    return {
+      minAmount: Number(result.min_amount ?? 0),
+      fiatEquivalent:
+        result.fiat_equivalent != null
+          ? Number(result.fiat_equivalent)
+          : undefined,
+    };
+  }
+
+  async createPayment(params: {
+    amount: number;
+    orderId: string;
+    network: string;
+    description?: string;
+    ipnCallbackUrl?: string;
+  }) {
+    const payCurrency = this.mapNetworkToCurrency(params.network);
+    const priceAmount = this.normalizeAmount(params.amount);
+
+    const buildPayload = (priceCurrency: string) => {
+      const payload: Record<string, unknown> = {
+        price_amount: priceAmount,
+        price_currency: priceCurrency,
+        pay_currency: payCurrency,
+        order_id: params.orderId,
+        order_description: params.description || 'TraderRank Pro payment',
+        is_fixed_rate: false,
+        is_fee_paid_by_user: false,
+      };
+      if (params.ipnCallbackUrl) {
+        payload.ipn_callback_url = params.ipnCallbackUrl;
+      }
+      return payload;
+    };
+
+    const post = (priceCurrency: string) =>
+      this.request<{
+        payment_id: number;
+        payment_status: string;
+        pay_address: string;
+        pay_amount: number;
+        pay_currency: string;
+        price_amount: number;
+        price_currency: string;
+        order_id: string;
+        invoice_url?: string;
+      }>('/payment', {
+        method: 'POST',
+        headers: this.headers(),
+        body: JSON.stringify(buildPayload(priceCurrency)),
+      });
+
+    try {
+      return await post('usdt');
+    } catch (err) {
+      if (
+        err instanceof NowPaymentsApiError &&
+        err.statusCode !== 429 &&
+        /currency|usdt|not allowed|invalid/i.test(err.message)
+      ) {
+        this.logger.warn(
+          'NOWPayments rejected USDT price currency — retrying with USD',
+        );
+        return post('usd');
+      }
+      throw err;
+    }
+  }
+
+  async createInvoice(params: {
+    amount: number;
+    orderId: string;
+    network: string;
+    description?: string;
+    successUrl?: string;
+    cancelUrl?: string;
+    ipnCallbackUrl?: string;
+  }) {
+    const payCurrency = this.mapNetworkToCurrency(params.network);
+
+    return this.request<{
+      id: string;
+      invoice_url: string;
+      order_id: string;
+    }>('/invoice', {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({
+        price_amount: this.normalizeAmount(params.amount),
+        price_currency: 'usdt',
+        pay_currency: payCurrency,
+        order_id: params.orderId,
+        order_description: params.description || 'TraderRank Pro payment',
+        success_url: params.successUrl,
+        cancel_url: params.cancelUrl,
+        ...(params.ipnCallbackUrl
+          ? { ipn_callback_url: params.ipnCallbackUrl }
+          : {}),
+        is_fixed_rate: false,
+      }),
+    });
+  }
+
+  private async fetchPaymentStatus(paymentId: string) {
+    return this.request<{
+      payment_id: number;
+      payment_status: string;
+      pay_address: string;
+      pay_amount: number;
+      actually_paid: number;
+      outcome_amount: number;
+      pay_currency?: string;
+    }>(`/payment/${paymentId}`, {
+      headers: this.headers(),
+    });
+  }
+
+  async getPaymentStatus(paymentId: string) {
+    const cached = this.statusCache.get(paymentId);
+    if (cached && Date.now() - cached.at < NowPaymentsService.STATUS_TTL_MS) {
+      return cached.data;
+    }
+    const data = await this.fetchPaymentStatus(paymentId);
+    this.statusCache.set(paymentId, { at: Date.now(), data });
+    return data;
+  }
+
+  private async getPayoutAuthToken(): Promise<string> {
+    if (this.payoutToken && Date.now() < this.payoutTokenExpiry) {
+      return this.payoutToken;
+    }
+
+    const email = this.payoutEmail();
+    const password = this.payoutPassword();
+
+    if (!email || !password) {
+      throw new Error(
+        'NOWPayments payout credentials not configured — set NOWPAYMENTS_PAYOUT_EMAIL and NOWPAYMENTS_PAYOUT_PASSWORD on the API server (your NOWPayments account login), then restart',
+      );
+    }
+
+    const result = await this.request<{ token: string }>('/auth', {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({ email, password }),
+    });
+
+    this.payoutToken = result.token;
+    this.payoutTokenExpiry = Date.now() + 4 * 60 * 1000;
+    return result.token;
+  }
+
+  async createPayout(params: {
+    address: string;
+    amount: number;
+    currency: string;
+    ipnCallbackUrl?: string;
+  }) {
+    const token = await this.getPayoutAuthToken();
+
+    return this.request<{ id: string; withdrawals: unknown[] }>('/payout', {
+      method: 'POST',
+      headers: this.headers({ Authorization: `Bearer ${token}` }),
+      body: JSON.stringify({
+        ipn_callback_url: params.ipnCallbackUrl,
+        withdrawals: [
+          {
+            address: params.address,
+            currency: params.currency,
+            amount: params.amount,
+            ipn_callback_url: params.ipnCallbackUrl,
+          },
+        ],
+      }),
+    });
+  }
+
+  async verifyPayout(payoutId: string, verificationCode: string) {
+    const token = await this.getPayoutAuthToken();
+
+    return this.request<{ ok?: boolean; message?: string }>(
+      `/payout/${payoutId}/verify`,
+      {
+        method: 'POST',
+        headers: this.headers({ Authorization: `Bearer ${token}` }),
+        body: JSON.stringify({ verification_code: verificationCode }),
+      },
+    );
+  }
+
+  async getBalance() {
+    return this.request<Record<string, { amount?: number; pendingAmount?: number }>>(
+      '/balance',
+      { headers: this.headers() },
+    );
+  }
+
+  /** Sum USDT custody balances (TRC20 + BEP20 + ERC20 when present). */
+  sumUsdtBalance(balances: Record<string, { amount?: number }>): number {
+    const keys = ['usdttrc20', 'usdtbsc', 'usdterc20', 'usdt'];
+    let total = 0;
+    for (const key of keys) {
+      const entry = balances[key];
+      if (entry?.amount != null && Number.isFinite(entry.amount)) {
+        total += entry.amount;
+      }
+    }
+    return total;
+  }
+
+  verifyIpnSignature(payload: string, signature: string): boolean {
+    const secret = this.config.get<string>('NOWPAYMENTS_IPN_SECRET');
+    if (!secret) return true;
+
+    const expected = createHmac('sha512', secret).update(payload).digest('hex');
+    return expected === signature;
+  }
+}

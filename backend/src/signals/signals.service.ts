@@ -1,0 +1,7083 @@
+import {
+  Injectable,
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+  ServiceUnavailableException,
+  UnauthorizedException,
+  Logger,
+} from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import { PrismaService } from '../prisma/prisma.service';
+import { DuplicateDetectionService } from './duplicate-detection.service';
+import { CreateSignalDto, ClaimSetupDto, TradeOutcomeWebhookDto, TradeLifecycleItemDto, TradeLifecycleWebhookDto, HubActionDto, UpdateSetupStopsDto, ModifyMt5PositionStopsDto, PlaceMt5MarketOrderDto, IngestExternalSignalDto } from '../common/dto';
+import { createHash } from 'crypto';
+import { ComplianceService } from '../compliance/compliance.service';
+import { ForwardSignalResult, SignalHubService } from './signal-hub.service';
+import { normalizeChartSymbol } from '../ai/chart-setup.util';
+import {
+  PriceMonitorService,
+  SetupOutcome,
+} from '../trades/price-monitor.service';
+import { WalletService } from '../trades/wallet.service';
+import { TpClaimsService } from '../tp-claims/tp-claims.service';
+import {
+  computeOneToOnePrice,
+  computeEntryMid,
+  classifyManualCloseOutcome,
+  isOneToOneClaimValidForSetup,
+  priceReachedOneToOne,
+} from '../common/rr.util';
+import { getPipSize, defaultMt5ChartSlPips } from '../common/pip.util';
+import { NotificationService } from '../email/notification.service';
+import { PlatformNotificationsService } from '../platform-notifications/platform-notifications.service';
+import {
+  Signal,
+  SubscriptionPlan,
+  Trade,
+  TradeDirection,
+  User,
+  UserRole,
+  EvaluationStatus,
+} from '@prisma/client';
+import { MetaApiService } from '../metaapi/metaapi.service';
+import {
+  buildMetaApiTradeIdentifiers,
+  resolvePendingOpenPrice,
+  resolvePendingOrderType,
+  roundToSymbolDigits,
+} from '../metaapi/metaapi-order.util';
+import { TradeRiskService } from '../ai/trade-risk.service';
+import {
+  resolveSetupExecutionPhase,
+  resolveTradeProgressOutcome,
+  resolveTp1ClaimBlockedReason,
+  isHubLimitPending,
+} from '../common/setup-execution.util';
+import { RISK_PERCENT, MAX_RISK_PER_TRADE, MAX_BREAKEVEN_RETRIES, SETUP_MAX_AGE_MS } from '../common/constants';
+import { hasActiveTradingAccess } from '../common/weekly-access.util';
+import {
+  hasActiveMt5Sync,
+  MT5_SYNC_PLACEHOLDER_SCREENSHOT,
+} from '../common/mt5-sync.util';
+import { CopyTradingService } from '../copy-trading/copy-trading.service';
+import { Mt5PoolService } from '../mt5-sync/mt5-pool.service';
+import { Mt5PoolModule } from '../mt5-sync/mt5-pool.module';
+import { InvestorTradingService } from '../investor/investor-trading.service';
+import { InvestorService } from '../investor/investor.service';
+import { computeTwoToOnePrice } from '../common/rr.util';
+import { SignalSource } from '@prisma/client';
+
+@Injectable()
+export class SignalsService {
+  private readonly logger = new Logger(SignalsService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private duplicateDetection: DuplicateDetectionService,
+    private compliance: ComplianceService,
+    private signalHub: SignalHubService,
+    private priceMonitor: PriceMonitorService,
+    private wallet: WalletService,
+    private tpClaims: TpClaimsService,
+    private notifications: NotificationService,
+    private platformNotifications: PlatformNotificationsService,
+    private metaApi: MetaApiService,
+    private tradeRisk: TradeRiskService,
+    private copyTrading: CopyTradingService,
+    private mt5Pool: Mt5PoolService,
+    private investorTrading: InvestorTradingService,
+    private investorService: InvestorService,
+  ) {}
+
+  private async mirrorToCopyPool(input: {
+    signal: {
+      id: string;
+      signalId: string;
+      symbol: string;
+      direction: TradeDirection;
+      entryMin: unknown;
+      entryMax: unknown;
+      stopLoss: unknown;
+      takeProfit: unknown;
+    };
+    user: { id: string; displayName: string };
+    openPrice: number;
+    pending: boolean;
+    orderKind?: string;
+  }) {
+    const full = await this.prisma.signal.findUnique({
+      where: { id: input.signal.id },
+      select: { signalSource: true },
+    });
+
+    const mirrorsInvestors =
+      full?.signalSource === SignalSource.SYSTEM ||
+      full?.signalSource === SignalSource.EXTERNAL;
+
+    if (mirrorsInvestors) {
+      try {
+        await this.investorTrading.mirrorToInvestors({
+          signalDbId: input.signal.id,
+          signalPublicId: input.signal.signalId,
+          symbol: input.signal.symbol,
+          direction: input.signal.direction,
+          entryMin: Number(input.signal.entryMin),
+          entryMax: Number(input.signal.entryMax),
+          stopLoss: Number(input.signal.stopLoss),
+          openPrice: input.openPrice,
+          pending: input.pending,
+          orderKind: input.orderKind,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Investor mirror failed for ${input.signal.signalId}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+      }
+    }
+
+    const mirrorsCopyPool =
+      full?.signalSource === SignalSource.TRADER ||
+      full?.signalSource === SignalSource.EXTERNAL;
+
+    if (!mirrorsCopyPool) return;
+
+    try {
+      await this.copyTrading.maybeMirrorTrade({
+        signalDbId: input.signal.id,
+        signalPublicId: input.signal.signalId,
+        sourceUserId: input.user.id,
+        sourceDisplayName: input.user.displayName,
+        symbol: input.signal.symbol,
+        direction: input.signal.direction,
+        entryMin: Number(input.signal.entryMin),
+        entryMax: Number(input.signal.entryMax),
+        stopLoss: Number(input.signal.stopLoss),
+        takeProfit: Number(input.signal.takeProfit),
+        openPrice: input.openPrice,
+        pending: input.pending,
+        orderKind: input.orderKind,
+        platformFeed: full?.signalSource === SignalSource.EXTERNAL,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Copy mirror failed for ${input.signal.signalId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    }
+  }
+
+  getCopyTradingDashboard(includeTerminal = true) {
+    return this.copyTrading.getCopyDashboard({ includeTerminal });
+  }
+
+  private validateEntryRange(dto: CreateSignalDto) {
+    if (dto.entryMin >= dto.entryMax) {
+      throw new BadRequestException(
+        'Entry min must be less than entry max (valid range required)',
+      );
+    }
+
+    const mid = (dto.entryMin + dto.entryMax) / 2;
+    if (dto.direction === 'BUY') {
+      if (dto.stopLoss >= dto.entryMin) {
+        throw new BadRequestException(
+          'For BUY signals, stop loss must be below the entry range',
+        );
+      }
+      if (dto.takeProfit <= dto.entryMax) {
+        throw new BadRequestException(
+          'For BUY signals, take profit must be above the entry range',
+        );
+      }
+    } else {
+      if (dto.stopLoss <= dto.entryMax) {
+        throw new BadRequestException(
+          'For SELL signals, stop loss must be above the entry range',
+        );
+      }
+      if (dto.takeProfit >= dto.entryMin) {
+        throw new BadRequestException(
+          'For SELL signals, take profit must be below the entry range',
+        );
+      }
+    }
+
+    void mid;
+  }
+
+  async getSetupQuota(userId: string) {
+    const now = new Date();
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+    const submittedToday = await this.prisma.signal.count({
+      where: {
+        userId,
+        submittedAt: { gte: startOfDay, lt: now },
+        status: { not: 'REJECTED_DUPLICATE' },
+      },
+    });
+
+    return {
+      plan: 'FREE' as SubscriptionPlan,
+      dailyLimit: null,
+      submittedToday,
+      remainingToday: null,
+      canSubmit: true,
+      subscriptionActive: true,
+      subscriptionExpiresAt: null,
+      pricing: null,
+    };
+  }
+
+  private async clearMatchingSetupDrafts(
+    userId: string,
+    screenshotUrl: string,
+  ) {
+    if (!screenshotUrl?.trim()) return;
+    await this.prisma.signalDraft.deleteMany({
+      where: { userId, screenshotUrl: screenshotUrl.trim() },
+    });
+  }
+
+  async submit(userId: string, dto: CreateSignalDto) {
+    dto = { ...dto, symbol: normalizeChartSymbol(dto.symbol) };
+    this.validateEntryRange(dto);
+
+    await this.compliance.requireActiveTrader(userId);
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { virtualAccount: true },
+    });
+
+    if (!user?.virtualAccount) {
+      throw new ForbiddenException('Virtual account not found');
+    }
+
+    const { isDuplicate, matchedSignal } =
+      await this.duplicateDetection.checkDuplicate(userId, dto);
+
+    const signalData = {
+      userId,
+      symbol: dto.symbol,
+      direction: dto.direction,
+      entryMin: dto.entryMin,
+      entryMax: dto.entryMax,
+      stopLoss: dto.stopLoss,
+      takeProfit: dto.takeProfit,
+      riskRewardRatio: dto.riskRewardRatio,
+      description: dto.description,
+      screenshotUrl: dto.screenshotUrl,
+    };
+
+    if (isDuplicate && matchedSignal) {
+      const message = `Your entry is within ${matchedSignal.pipDistance} pips of a setup already submitted by ${matchedSignal.traderName}. Change your entry to submit an original setup.`;
+
+      await this.prisma.violation.create({
+        data: {
+          userId,
+          type: 'DUPLICATE_SIGNAL',
+          description: `Copied setup within ${matchedSignal.pipDistance} pips of @${matchedSignal.traderName}`,
+          evidence: { dto: { ...dto }, matchedSignal } as object,
+        },
+      });
+
+      const rejected = await this.prisma.signal.create({
+        data: { ...signalData, status: 'REJECTED_DUPLICATE' },
+      });
+
+      await this.clearMatchingSetupDrafts(userId, dto.screenshotUrl);
+
+      return {
+        status: 'duplicate_signal',
+        signalId: rejected.signalId,
+        message,
+        matchedSignal,
+      };
+    }
+
+    const screenshotHash = createHash('sha256')
+      .update(dto.screenshotUrl)
+      .digest('hex');
+
+    const existingHash = await this.prisma.signal.findFirst({
+      where: { screenshotHash, userId: { not: userId } },
+    });
+
+    if (existingHash) {
+      await this.prisma.riskFlag.create({
+        data: {
+          userId,
+          reason: 'Screenshot reuse detected',
+          severity: 3,
+          metadata: { existingSignalId: existingHash.signalId },
+        },
+      });
+    }
+
+    const signal = await this.prisma.signal.create({
+      data: {
+        ...signalData,
+        screenshotHash,
+        status: 'OPEN',
+      },
+    });
+
+    await this.prisma.trade.create({
+      data: {
+        signalId: signal.id,
+        userId,
+        symbol: dto.symbol,
+        direction: dto.direction,
+        entryMin: dto.entryMin,
+        entryMax: dto.entryMax,
+        stopLoss: dto.stopLoss,
+        takeProfit: dto.takeProfit,
+      },
+    });
+
+    await this.clearMatchingSetupDrafts(userId, dto.screenshotUrl);
+
+    const trade = await this.prisma.trade.findUnique({
+      where: { signalId: signal.id },
+    });
+
+    this.queueSetupExecutionInBackground({
+      signalId: signal.id,
+      userId,
+      dto,
+    });
+
+    return this.buildPendingForwardResponse(
+      signal.signalId,
+      signal.submittedAt,
+      dto,
+    );
+  }
+
+  /** Fire-and-forget MT5/Hub execution after the HTTP response is sent. */
+  private queueSetupExecutionInBackground(input: {
+    signalId: string;
+    userId: string;
+    dto: CreateSignalDto;
+  }) {
+    void this.runSetupLimitExecutionSafe(input).catch((err) => {
+      this.logger.error(
+        `Background execution failed for signal ${input.signalId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    });
+  }
+
+  private async runSetupLimitExecutionSafe(input: {
+    signalId: string;
+    userId: string;
+    dto: CreateSignalDto;
+  }) {
+    const signal = await this.prisma.signal.findUnique({
+      where: { id: input.signalId },
+      include: { trade: true },
+    });
+    if (!signal?.trade) return;
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: input.userId },
+      include: { virtualAccount: true },
+    });
+    if (!user?.virtualAccount) return;
+
+    const forwardResult = await this.queueSetupLimitExecution({
+      signal: { ...signal, trade: signal.trade },
+      user,
+      userId: input.userId,
+      dto: input.dto,
+    });
+
+    if (forwardResult.forwarded) {
+      await this.maybeNotifyHubOrderPlaced(signal, input.userId, forwardResult);
+    }
+  }
+
+  private buildPendingForwardResponse(
+    signalId: string,
+    submittedAt: Date,
+    dto: CreateSignalDto,
+  ) {
+    return {
+      status: 'accepted' as const,
+      signalId,
+      submittedAt,
+      entryRange: { min: dto.entryMin, max: dto.entryMax },
+      execution: {
+        status: 'pending' as const,
+        forwarded: false,
+      },
+      executionHub: null,
+      executionValidation: null,
+    };
+  }
+
+  async warmupExecution(userId: string) {
+    if (!this.metaApi.isConfigured) {
+      return { ready: false, message: 'MetaAPI not configured' };
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { metaApiAccountId: true },
+    });
+    const accountId = this.metaApi.resolveAccountId(user?.metaApiAccountId);
+    if (!accountId) {
+      return { ready: false, message: 'No trading account configured' };
+    }
+
+    try {
+      await this.metaApi.ensureAccountReady(accountId);
+      return { ready: true, accountId };
+    } catch (err) {
+      return {
+        ready: false,
+        message: err instanceof Error ? err.message : 'Connection failed',
+      };
+    }
+  }
+
+  async createFromMt5Sync(
+    userId: string,
+    input: {
+      symbol: string;
+      direction: TradeDirection;
+      openPrice: number;
+      entryMin: number;
+      entryMax: number;
+      stopLoss: number;
+      takeProfit: number;
+      userAccountId: string;
+      userPositionId: string;
+      volume: number;
+    },
+  ) {
+    await this.compliance.requireActiveTrader(userId);
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { virtualAccount: true },
+    });
+    if (!user?.virtualAccount) {
+      throw new ForbiddenException('Virtual account not found');
+    }
+
+    const dto: CreateSignalDto = {
+      symbol: input.symbol,
+      direction: input.direction,
+      entryMin: input.entryMin,
+      entryMax: input.entryMax,
+      stopLoss: input.stopLoss,
+      takeProfit: input.takeProfit,
+      riskRewardRatio: 0,
+      description: `MT5 Live Sync — ${input.symbol} ${input.direction}`,
+      screenshotUrl: MT5_SYNC_PLACEHOLDER_SCREENSHOT,
+    };
+
+    this.validateEntryRange(dto);
+
+    const risk = Math.abs(input.openPrice - input.stopLoss);
+    const reward = Math.abs(input.takeProfit - input.openPrice);
+    dto.riskRewardRatio =
+      risk > 0 ? Number((reward / risk).toFixed(2)) : 0;
+
+    const { isDuplicate, matchedSignal } =
+      await this.duplicateDetection.checkDuplicate(userId, dto);
+    if (isDuplicate && matchedSignal) {
+      this.logger.warn(
+        `MT5 sync duplicate entry for ${userId} near @${matchedSignal.traderName} — importing anyway`,
+      );
+    }
+
+    const screenshotHash = createHash('sha256')
+      .update(`mt5-sync:${input.userPositionId}`)
+      .digest('hex');
+
+    const signal = await this.prisma.signal.create({
+      data: {
+        userId,
+        symbol: input.symbol,
+        direction: input.direction,
+        entryMin: input.entryMin,
+        entryMax: input.entryMax,
+        stopLoss: input.stopLoss,
+        takeProfit: input.takeProfit,
+        riskRewardRatio: dto.riskRewardRatio,
+        description: dto.description,
+        screenshotUrl: MT5_SYNC_PLACEHOLDER_SCREENSHOT,
+        screenshotHash,
+        source: 'mt5_sync',
+        status: 'OPEN',
+      },
+    });
+
+    const trade = await this.prisma.trade.create({
+      data: {
+        signalId: signal.id,
+        userId,
+        symbol: input.symbol,
+        direction: input.direction,
+        entryMin: input.entryMin,
+        entryMax: input.entryMax,
+        stopLoss: input.stopLoss,
+        takeProfit: input.takeProfit,
+      },
+    });
+
+    await this.priceMonitor.ensureTradeActivated(
+      trade,
+      signal,
+      input.openPrice,
+    );
+
+    await this.mirrorToCopyPool({
+      signal,
+      user,
+      openPrice: input.openPrice,
+      pending: false,
+    });
+
+    this.logger.log(
+      `MT5 sync setup ${signal.signalId} created from position ${input.userPositionId}`,
+    );
+
+    return {
+      signalDbId: signal.id,
+      signalPublicId: signal.signalId,
+      symbol: input.symbol,
+    };
+  }
+
+  async resolveSyncedSetupClosed(userId: string, signalPublicId: string) {
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId: signalPublicId, userId, status: 'OPEN' },
+      include: { trade: true },
+    });
+    if (!signal?.trade) {
+      return { status: 'skipped' as const, signalId: signalPublicId };
+    }
+
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+    const sl = Number(signal.stopLoss);
+    const tp = Number(signal.takeProfit);
+    let exitPrice = computeEntryMid(entryMin, entryMax);
+
+    const accountId =
+      signal.metaApiAccountId ??
+      this.metaApi.getConfiguredDefaultAccountId();
+    if (accountId && this.metaApi.isConfigured) {
+      try {
+        const account = await this.metaApi.ensureAccountReady(accountId);
+        const quote = await this.metaApi.getSymbolPrice(account, signal.symbol);
+        exitPrice = signal.direction === 'BUY' ? quote.bid : quote.ask;
+      } catch {
+        /* keep entry mid */
+      }
+    }
+
+    await this.priceMonitor.ensureTradeActivated(signal.trade, signal, exitPrice);
+
+    const outcome = this.priceMonitor.outcomeAtPrice(
+      signal.direction,
+      tp,
+      sl,
+      exitPrice,
+    );
+
+    if (outcome === 'tp' || outcome === 'sl') {
+      return this.applySetupOutcome(signal, outcome, exitPrice, 'webhook');
+    }
+
+    const oneToOnePrice = computeOneToOnePrice(
+      signal.direction,
+      entryMin,
+      entryMax,
+      sl,
+    );
+    const manualOutcome = classifyManualCloseOutcome(
+      signal.direction,
+      entryMin,
+      entryMax,
+      oneToOnePrice,
+      exitPrice,
+    );
+
+    if (manualOutcome === 'tp') {
+      return this.wallet.resolveAsManualWin(userId, signal.id, exitPrice);
+    }
+    if (manualOutcome === 'sl') {
+      return this.wallet.resolveAsLoss(userId, signal.id, exitPrice);
+    }
+    return this.wallet.resolveAsEven(userId, signal.id, exitPrice);
+  }
+
+  async resendToHub(userId: string, signalId: string) {
+    await this.compliance.requireActiveTrader(userId);
+
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId },
+      include: { trade: true },
+    });
+    if (!signal) throw new NotFoundException('Signal not found');
+    if (signal.status === 'REJECTED_DUPLICATE') {
+      throw new BadRequestException('Cannot resend a rejected duplicate signal');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { virtualAccount: true },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const dto: CreateSignalDto = {
+      symbol: signal.symbol,
+      direction: signal.direction,
+      entryMin: Number(signal.entryMin),
+      entryMax: Number(signal.entryMax),
+      stopLoss: Number(signal.stopLoss),
+      takeProfit: Number(signal.takeProfit),
+      riskRewardRatio: Number(signal.riskRewardRatio),
+      description: signal.description,
+      screenshotUrl: signal.screenshotUrl,
+    };
+
+    const forwardResult = await this.queueSetupLimitExecution({
+      signal,
+      user,
+      userId,
+      dto,
+    });
+
+    if (forwardResult.forwarded) {
+      await this.maybeNotifyHubOrderPlaced(signal, userId, forwardResult);
+    }
+
+    return this.buildForwardResponse(
+      signal.signalId,
+      signal.submittedAt,
+      dto,
+      user.displayName,
+      userId,
+      forwardResult,
+      forwardResult.forwarded ? 'resent' : 'resend_failed',
+    );
+  }
+
+  async listMetaApiAccountsForUser(userId: string) {
+    return this.mt5Pool.listLinkableAccounts(userId);
+  }
+
+  async placeTrade(userId: string, signalId: string) {
+    await this.compliance.requireActiveTrader(userId);
+
+    if (!this.metaApi.isConfigured) {
+      throw new ServiceUnavailableException(
+        'Live trading is not configured on the server',
+      );
+    }
+
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId },
+      include: { trade: true },
+    });
+    if (!signal) throw new NotFoundException('Signal not found');
+    if (signal.status !== 'OPEN') {
+      throw new BadRequestException(
+        `Only open setups can be traded (current status: ${signal.status})`,
+      );
+    }
+    if (signal.metaApiExecutedAt) {
+      throw new BadRequestException('This setup already has a live trade placed');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { virtualAccount: true },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const accountId = this.metaApi.resolveAccountId(user.metaApiAccountId);
+    if (!accountId) {
+      throw new BadRequestException(
+        'No trading account linked — choose one in Settings → Live trading account',
+      );
+    }
+
+    const account = await this.metaApi.getAccount(accountId);
+    const sl = Number(signal.stopLoss);
+    const tp = Number(signal.takeProfit);
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+
+    const price = await this.metaApi.getSymbolPrice(account, signal.symbol);
+    const marketEntry =
+      signal.direction === 'BUY' ? price.ask : price.bid;
+
+    const riskPercent = Number(
+      user.virtualAccount?.riskPercent ?? RISK_PERCENT,
+    );
+    const maxRiskAmount = Number(
+      user.virtualAccount?.maxRiskPerTrade ?? MAX_RISK_PER_TRADE,
+    );
+
+    const spec = await this.metaApi.getSymbolSpecification(
+      account,
+      signal.symbol,
+    );
+
+    const { comment: orderComment, clientId } = buildMetaApiTradeIdentifiers({
+      displayName: user.displayName,
+      userId,
+      signalId: signal.signalId,
+      symbol: signal.symbol,
+    });
+
+    const riskInput = {
+      account,
+      symbol: signal.symbol,
+      direction: signal.direction,
+      stopLoss: sl,
+      takeProfit: tp,
+      riskPercent: Math.max(riskPercent, RISK_PERCENT),
+      maxRiskAmount,
+    };
+
+    let sizing = await this.tradeRisk.calculatePositionSize({
+      ...riskInput,
+      entryPrice: marketEntry,
+    });
+
+    const placed = await this.metaApi.placeOrderWithFallback({
+      account,
+      symbol: signal.symbol,
+      direction: signal.direction,
+      volume: sizing.volume,
+      stopLoss: sl,
+      takeProfit: tp,
+      entryMin,
+      entryMax,
+      price,
+      specDigits: spec.digits,
+      comment: orderComment,
+      clientId,
+      recalculateVolume: async (openPrice) => {
+        sizing = await this.tradeRisk.calculatePositionSize({
+          ...riskInput,
+          entryPrice: openPrice,
+        });
+        return sizing.volume;
+      },
+    });
+
+    const entryPrice = placed.openPrice;
+    const result = placed.trade;
+    const now = new Date();
+
+    await this.prisma.$transaction([
+      this.prisma.signal.update({
+        where: { id: signal.id },
+        data: {
+          metaApiAccountId: account.id,
+          metaApiOrderId: result.orderId ?? null,
+          metaApiPositionId: result.positionId ?? result.orderId ?? null,
+          metaApiExecutedAt: now,
+        },
+      }),
+      this.prisma.trade.update({
+        where: { signalId: signal.id },
+        data: placed.pending
+          ? { entryPrice }
+          : {
+              entryPrice,
+              activatedAt: now,
+            },
+      }),
+    ]);
+
+    await this.mirrorToCopyPool({
+      signal,
+      user,
+      openPrice: entryPrice,
+      pending: placed.pending,
+      orderKind: placed.orderKind,
+    });
+
+    return {
+      status: placed.pending ? 'pending' : 'placed',
+      signalId: signal.signalId,
+      symbol: signal.symbol,
+      direction: signal.direction,
+      entryPrice,
+      stopLoss: sl,
+      takeProfit: tp,
+      quote: price,
+      orderKind: placed.orderKind,
+      pending: placed.pending,
+      risk: {
+        volume: sizing.volume,
+        riskPercent: sizing.riskPercent,
+        riskAmount: sizing.riskAmount,
+        estimatedLossAtSl: sizing.estimatedLossAtSl,
+        accountEquity: sizing.accountEquity,
+        currency: sizing.currency,
+        aiManaged: sizing.aiManaged,
+        notes: sizing.aiNotes,
+      },
+      metaApi: {
+        accountId: account.id,
+        accountName: account.name,
+        orderId: result.orderId,
+        positionId: result.positionId,
+        message: result.message,
+        comment: orderComment,
+        orderKind: placed.orderKind,
+      },
+    };
+  }
+
+  private async persistHubForward(
+    signalDbId: string,
+    displayName: string,
+    userId: string,
+    forwardResult: ForwardSignalResult,
+  ) {
+    if (!forwardResult.forwarded || !forwardResult.hub?.id) return;
+
+    await this.prisma.signal.update({
+      where: { id: signalDbId },
+      data: {
+        hubSenderName: this.signalHub.toSenderName(displayName, userId),
+        hubRecordId: forwardResult.hub.id,
+      },
+    });
+  }
+
+  private signalToCreateDto(signal: {
+    symbol: string;
+    direction: TradeDirection;
+    entryMin: unknown;
+    entryMax: unknown;
+    stopLoss: unknown;
+    takeProfit: unknown;
+    riskRewardRatio: unknown;
+    description: string;
+    screenshotUrl: string;
+  }): CreateSignalDto {
+    return {
+      symbol: signal.symbol,
+      direction: signal.direction,
+      entryMin: Number(signal.entryMin),
+      entryMax: Number(signal.entryMax),
+      stopLoss: Number(signal.stopLoss),
+      takeProfit: Number(signal.takeProfit),
+      riskRewardRatio: Number(signal.riskRewardRatio),
+      description: signal.description,
+      screenshotUrl: signal.screenshotUrl,
+    };
+  }
+
+  private orderDetailsFromForward(forwardResult: ForwardSignalResult): {
+    orderType: string;
+    entry: number;
+  } | null {
+    const sent = forwardResult.validation.sentPrices;
+    if (!sent?.entry) return null;
+    const orderType =
+      (forwardResult.hub?.payload?.order_type as string | undefined) || 'limit';
+    return { orderType, entry: sent.entry };
+  }
+
+  private orderDetailsFromHubPayload(
+    payload: Record<string, unknown> | undefined,
+    fallback: { entryMin: number; entryMax: number; direction: TradeDirection },
+  ): { orderType: string; entry: number } {
+    const entry = Number(payload?.entry);
+    const orderType = String(payload?.order_type || 'limit');
+    if (Number.isFinite(entry)) {
+      return { orderType, entry };
+    }
+    const edge =
+      fallback.direction === 'BUY' ? fallback.entryMin : fallback.entryMax;
+    return { orderType, entry: edge };
+  }
+
+  private async maybeNotifyHubOrderPlaced(
+    signal: {
+      id: string;
+      signalId: string;
+      symbol: string;
+      direction: TradeDirection;
+      entryMin: unknown;
+      entryMax: unknown;
+      stopLoss: unknown;
+      takeProfit: unknown;
+      hubOrderNotifiedAt: Date | null;
+    },
+    userId: string,
+    forwardResult: ForwardSignalResult,
+  ) {
+    const order = this.orderDetailsFromForward(forwardResult);
+    if (!order) return;
+    await this.notifyHubOrderPlaced(signal, userId, order);
+  }
+
+  private async notifyHubOrderPlaced(
+    signal: {
+      id: string;
+      signalId: string;
+      symbol: string;
+      direction: TradeDirection;
+      entryMin: unknown;
+      entryMax: unknown;
+      stopLoss: unknown;
+      takeProfit: unknown;
+      hubOrderNotifiedAt: Date | null;
+    },
+    userId: string,
+    order: { orderType: string; entry: number },
+  ) {
+    if (signal.hubOrderNotifiedAt) return;
+
+    await this.prisma.signal.update({
+      where: { id: signal.id },
+      data: { hubOrderNotifiedAt: new Date() },
+    });
+
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+    const sl = Number(signal.stopLoss);
+    const tp = Number(signal.takeProfit);
+    const orderLabel =
+      order.orderType.toLowerCase() === 'stop' ? 'Stop' : 'Limit';
+    const title = `${orderLabel} order placed — ${signal.symbol}`;
+    const body = `${signal.direction} ${signal.symbol}: ${order.orderType} @ ${order.entry}, entry zone ${entryMin}–${entryMax}, SL ${sl}, TP ${tp}.`;
+
+    await this.platformNotifications.create({
+      userId,
+      type: 'HUB_ORDER_PLACED',
+      title,
+      body,
+      linkUrl: '/dashboard',
+      signalId: signal.signalId,
+    });
+
+    this.notifications.hubOrderPlaced(userId, {
+      symbol: signal.symbol,
+      signalId: signal.signalId,
+      direction: signal.direction,
+      orderType: order.orderType,
+      entry: order.entry,
+      entryMin,
+      entryMax,
+      stopLoss: sl,
+      takeProfit: tp,
+    });
+  }
+
+  private async evaluateActiveSetupHubOrder(input: {
+    signal: {
+      id: string;
+      signalId: string;
+      status: string;
+      hubRecordId: string | null;
+      hubSenderName: string | null;
+      symbol: string;
+      direction: TradeDirection;
+      entryMin: unknown;
+      entryMax: unknown;
+      stopLoss: unknown;
+      metaApiAccountId: string | null;
+      metaApiOrderId: string | null;
+      metaApiPositionId: string | null;
+      metaApiExecutedAt: Date | null;
+      trade: {
+        activatedAt: Date | null;
+        closedAt: Date | null;
+        entryPrice: unknown;
+      } | null;
+    };
+    userId: string;
+    user: { displayName: string; metaApiAccountId: string | null };
+  }): Promise<
+    | { action: 'skip'; reason: string }
+    | { action: 'has_order'; order: { orderType: string; entry: number } }
+    | { action: 'place' }
+  > {
+    const { signal, userId, user } = input;
+
+    if (signal.status !== 'OPEN') {
+      return { action: 'skip', reason: 'signal_not_open' };
+    }
+    if (signal.trade?.closedAt) {
+      return { action: 'skip', reason: 'trade_closed' };
+    }
+
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+    const sl = Number(signal.stopLoss);
+    const oneToOnePrice = computeOneToOnePrice(
+      signal.direction,
+      entryMin,
+      entryMax,
+      sl,
+    );
+
+    const liveTrade = await this.resolveSetupLiveTrade(
+      signal,
+      userId,
+      user,
+      oneToOnePrice,
+      null,
+    );
+    const liveStatus =
+      typeof liveTrade?.status === 'string' ? liveTrade.status : undefined;
+
+    if (liveStatus === 'open') {
+      return { action: 'skip', reason: 'position_open' };
+    }
+    if (liveStatus === 'pending') {
+      const order = this.orderDetailsFromHubPayload(undefined, {
+        entryMin,
+        entryMax,
+        direction: signal.direction,
+      });
+      return { action: 'has_order', order };
+    }
+
+    if (!this.signalHub.isConfigured) {
+      return { action: 'skip', reason: 'hub_not_configured' };
+    }
+
+    const sendername =
+      signal.hubSenderName ||
+      this.signalHub.toSenderName(user.displayName, userId);
+    const hub = await this.signalHub.getByExternalId(signal.signalId, sendername);
+    const hubStatus = hub?.status ?? null;
+    const hubExecuted = Boolean(hub?.progress?.executed);
+
+    if (hubExecuted) {
+      return { action: 'skip', reason: 'hub_executed' };
+    }
+
+    if (signal.hubRecordId && !hub) {
+      return { action: 'place' };
+    }
+
+    if (
+      isHubLimitPending(signal.hubRecordId, hubExecuted, hubStatus) ||
+      (hub?.id && !hubExecuted && hubStatus)
+    ) {
+      const status = (hubStatus ?? '').toLowerCase();
+      const terminal = [
+        'invalidated',
+        'failed',
+        'cancelled',
+        'canceled',
+        'closed',
+        'rejected',
+        'expired',
+        'done',
+        'not_found',
+      ];
+      if (!status || !terminal.some((t) => status.includes(t))) {
+        const order = this.orderDetailsFromHubPayload(
+          hub?.payload as Record<string, unknown> | undefined,
+          { entryMin, entryMax, direction: signal.direction },
+        );
+        return { action: 'has_order', order };
+      }
+    }
+
+    if (!signal.hubRecordId) {
+      return { action: 'place' };
+    }
+
+    const status = (hubStatus ?? '').toLowerCase();
+    if (
+      status &&
+      ['invalidated', 'failed', 'cancelled', 'canceled', 'rejected', 'expired'].some(
+        (t) => status.includes(t),
+      )
+    ) {
+      return { action: 'place' };
+    }
+
+    return { action: 'skip', reason: 'unknown_hub_state' };
+  }
+
+  private isActiveTraderUser(user: {
+    role?: string;
+    status: string;
+    registrationPaid: boolean;
+    accessExpiresAt?: Date | null;
+  }): boolean {
+    return hasActiveTradingAccess(user);
+  }
+
+  private resolveMetaApiLimitOrderDetails(
+    signal: {
+      direction: TradeDirection;
+      entryMin: unknown;
+      entryMax: unknown;
+    },
+    marketPrice?: number | null,
+  ): { orderType: string; entry: number } {
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+    const edge = signal.direction === 'BUY' ? entryMin : entryMax;
+    if (marketPrice == null || !Number.isFinite(marketPrice)) {
+      return { orderType: 'limit', entry: edge };
+    }
+    const openPrice = resolvePendingOpenPrice(
+      signal.direction,
+      entryMin,
+      entryMax,
+      marketPrice,
+    );
+    const orderKind = resolvePendingOrderType(
+      signal.direction,
+      openPrice,
+      marketPrice,
+    );
+    return {
+      orderType: orderKind.includes('STOP') ? 'stop' : 'limit',
+      entry: openPrice,
+    };
+  }
+
+  private metaApiLimitCovered(
+    result:
+      | { status: 'placed'; orderType: string; entry: number }
+      | { status: 'has_order'; orderType: string; entry: number }
+      | { status: 'skipped'; reason: string }
+      | { status: 'unavailable' },
+  ): boolean {
+    return result.status === 'placed' || result.status === 'has_order';
+  }
+
+  /** MetaAPI first when configured (user account or platform default), Hub as fallback. */
+  private async queueSetupLimitExecution(input: {
+    signal: {
+      id: string;
+      signalId: string;
+      symbol: string;
+      direction: TradeDirection;
+      status: string;
+      hubRecordId: string | null;
+      hubSenderName: string | null;
+      hubOrderNotifiedAt: Date | null;
+      entryMin: unknown;
+      entryMax: unknown;
+      stopLoss: unknown;
+      takeProfit: unknown;
+      riskRewardRatio: unknown;
+      description: string;
+      screenshotUrl: string;
+      metaApiAccountId: string | null;
+      metaApiOrderId: string | null;
+      metaApiPositionId: string | null;
+      metaApiExecutedAt: Date | null;
+      trade: Trade | null;
+    };
+    user: {
+      displayName: string;
+      metaApiAccountId: string | null;
+      virtualAccount?: {
+        riskPercent: unknown;
+        maxRiskPerTrade: unknown;
+      } | null;
+    };
+    userId: string;
+    dto: CreateSignalDto;
+  }): Promise<ForwardSignalResult> {
+    const { signal, user, userId, dto } = input;
+
+    if (this.metaApi.isConfigured) {
+      const metaResult = await this.ensureMetaApiPendingLimitForSetup(
+        signal,
+        user,
+        userId,
+      );
+      if (this.metaApiLimitCovered(metaResult)) {
+        const order =
+          metaResult.status === 'placed' || metaResult.status === 'has_order'
+            ? { orderType: metaResult.orderType, entry: metaResult.entry }
+            : null;
+        return {
+          hub: null,
+          forwarded: true,
+          validation: {
+            approved: true,
+            adjusted: false,
+            issues: ['Limit queued via MetaAPI'],
+            sentPrices: order
+              ? {
+                  symbol: dto.symbol,
+                  direction: dto.direction.toLowerCase(),
+                  entry: order.entry,
+                  sl: dto.stopLoss,
+                  tp: dto.takeProfit,
+                }
+              : undefined,
+          },
+        };
+      }
+    }
+
+    if (!this.signalHub.isConfigured) {
+      return {
+        hub: null,
+        forwarded: false,
+        hubError: 'Neither MetaAPI nor Signal Hub could queue this setup',
+        validation: {
+          approved: true,
+          adjusted: false,
+          issues: [],
+        },
+      };
+    }
+
+    const forwardResult = await this.signalHub.forwardSignal(
+      signal.signalId,
+      dto,
+      user.displayName,
+      userId,
+    );
+    await this.persistHubForward(signal.id, user.displayName, userId, forwardResult);
+    return forwardResult;
+  }
+
+  private async syncHubLimitForSignal(
+    signal: {
+      id: string;
+      signalId: string;
+      symbol: string;
+      direction: TradeDirection;
+      status: string;
+      hubRecordId: string | null;
+      hubSenderName: string | null;
+      hubOrderNotifiedAt: Date | null;
+      entryMin: unknown;
+      entryMax: unknown;
+      stopLoss: unknown;
+      takeProfit: unknown;
+      riskRewardRatio: unknown;
+      description: string;
+      screenshotUrl: string;
+      metaApiAccountId: string | null;
+      metaApiOrderId: string | null;
+      metaApiPositionId: string | null;
+      metaApiExecutedAt: Date | null;
+      trade: {
+        activatedAt: Date | null;
+        closedAt: Date | null;
+        entryPrice: unknown;
+      } | null;
+    },
+    userId: string,
+    user: { displayName: string; metaApiAccountId: string | null },
+  ) {
+    const evaluation = await this.evaluateActiveSetupHubOrder({
+      signal,
+      userId,
+      user,
+    });
+
+    if (evaluation.action === 'skip') return;
+
+    if (evaluation.action === 'has_order') {
+      if (!signal.hubOrderNotifiedAt) {
+        await this.notifyHubOrderPlaced(signal, userId, evaluation.order);
+      }
+      return;
+    }
+
+    const dto = this.signalToCreateDto(signal);
+    const forwardResult = await this.signalHub.forwardSignal(
+      signal.signalId,
+      dto,
+      user.displayName,
+      userId,
+    );
+    await this.persistHubForward(
+      signal.id,
+      user.displayName,
+      userId,
+      forwardResult,
+    );
+
+    if (forwardResult.forwarded) {
+      this.logger.log(`Hub sync placed limit/stop for ${signal.signalId}`);
+      await this.maybeNotifyHubOrderPlaced(signal, userId, forwardResult);
+    } else {
+      this.logger.warn(
+        `Hub sync could not place order for ${signal.signalId}: ${forwardResult.hubError}`,
+      );
+    }
+  }
+
+  /** Place pending limit/stop on MetaAPI (user-linked or platform default account). */
+  private async ensureMetaApiPendingLimitForSetup(
+    signal: {
+      id: string;
+      signalId: string;
+      symbol: string;
+      direction: TradeDirection;
+      status: string;
+      entryMin: unknown;
+      entryMax: unknown;
+      stopLoss: unknown;
+      takeProfit: unknown;
+      hubOrderNotifiedAt: Date | null;
+      metaApiAccountId: string | null;
+      metaApiOrderId: string | null;
+      metaApiPositionId: string | null;
+      metaApiExecutedAt: Date | null;
+      trade: Trade | null;
+    },
+    user: {
+      displayName: string;
+      metaApiAccountId: string | null;
+      virtualAccount?: {
+        riskPercent: unknown;
+        maxRiskPerTrade: unknown;
+      } | null;
+    },
+    userId: string,
+  ): Promise<
+    | { status: 'placed'; orderType: string; entry: number }
+    | { status: 'has_order'; orderType: string; entry: number }
+    | { status: 'skipped'; reason: string }
+    | { status: 'unavailable' }
+  > {
+    if (!this.metaApi.isConfigured) return { status: 'unavailable' };
+    if (!signal.trade) return { status: 'skipped', reason: 'no_trade' };
+
+    const accountId = this.metaApi.resolveAccountId(
+      signal.metaApiAccountId ?? user.metaApiAccountId,
+    );
+    if (!accountId) return { status: 'unavailable' };
+
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+    const sl = Number(signal.stopLoss);
+    const tp = Number(signal.takeProfit);
+    const oneToOnePrice = computeOneToOnePrice(
+      signal.direction,
+      entryMin,
+      entryMax,
+      sl,
+    );
+
+    const liveTrade = await this.resolveSetupLiveTrade(
+      signal,
+      userId,
+      user,
+      oneToOnePrice,
+      null,
+    );
+    const liveStatus =
+      typeof liveTrade?.status === 'string' ? liveTrade.status : undefined;
+
+    let marketPrice: number | null = null;
+    try {
+      const account = await this.metaApi.getAccount(accountId);
+      const price = await this.metaApi.getSymbolPrice(account, signal.symbol);
+      marketPrice = signal.direction === 'BUY' ? price.ask : price.bid;
+    } catch {
+      marketPrice = null;
+    }
+
+    if (liveStatus === 'open' || liveStatus === 'pending') {
+      const order = this.resolveMetaApiLimitOrderDetails(signal, marketPrice);
+      return { status: 'has_order', ...order };
+    }
+
+    const account = await this.metaApi.getAccount(accountId);
+    const price = await this.metaApi.getSymbolPrice(account, signal.symbol);
+    marketPrice = signal.direction === 'BUY' ? price.ask : price.bid;
+    const spec = await this.metaApi.getSymbolSpecification(account, signal.symbol);
+    const digits = spec.digits ?? 5;
+    const openPrice = roundToSymbolDigits(
+      resolvePendingOpenPrice(
+        signal.direction,
+        entryMin,
+        entryMax,
+        marketPrice,
+      ),
+      digits,
+    );
+    const orderKind = resolvePendingOrderType(
+      signal.direction,
+      openPrice,
+      marketPrice,
+    );
+
+    const riskPercent = Number(
+      user.virtualAccount?.riskPercent ?? RISK_PERCENT,
+    );
+    const maxRiskAmount = Number(
+      user.virtualAccount?.maxRiskPerTrade ?? MAX_RISK_PER_TRADE,
+    );
+    const { comment, clientId } = buildMetaApiTradeIdentifiers({
+      displayName: user.displayName,
+      userId,
+      signalId: signal.signalId,
+      symbol: signal.symbol,
+    });
+    const sizing = await this.tradeRisk.calculatePositionSize({
+      account,
+      symbol: signal.symbol,
+      direction: signal.direction,
+      stopLoss: sl,
+      takeProfit: tp,
+      riskPercent: Math.max(riskPercent, RISK_PERCENT),
+      maxRiskAmount,
+      entryPrice: openPrice,
+      skipAiReview: true,
+    });
+
+    const { trade } = await this.metaApi.placePendingOrder({
+      account,
+      symbol: signal.symbol,
+      orderKind,
+      openPrice,
+      volume: sizing.volume,
+      stopLoss: sl,
+      takeProfit: tp,
+      comment,
+      clientId,
+      price,
+      specDigits: digits,
+    });
+
+    const now = new Date();
+    await this.prisma.$transaction([
+      this.prisma.signal.update({
+        where: { id: signal.id },
+        data: {
+          metaApiAccountId: account.id,
+          metaApiOrderId: trade.orderId ?? null,
+          metaApiPositionId: trade.positionId ?? trade.orderId ?? null,
+          metaApiExecutedAt: now,
+        },
+      }),
+      this.prisma.trade.update({
+        where: { signalId: signal.id },
+        data: { entryPrice: openPrice },
+      }),
+    ]);
+
+    const orderType = orderKind.includes('STOP') ? 'stop' : 'limit';
+    if (!signal.hubOrderNotifiedAt) {
+      await this.notifyHubOrderPlaced(signal, userId, {
+        orderType,
+        entry: openPrice,
+      });
+    }
+
+    this.logger.log(
+      `MetaAPI sync placed ${orderType} for ${signal.signalId} @ ${openPrice}`,
+    );
+
+    await this.mirrorToCopyPool({
+      signal,
+      user: { id: userId, displayName: user.displayName },
+      openPrice,
+      pending: true,
+      orderKind,
+    });
+
+    return { status: 'placed', orderType, entry: openPrice };
+  }
+
+  private buildForwardResponse(
+    signalId: string,
+    submittedAt: Date,
+    dto: CreateSignalDto,
+    displayName: string,
+    userId: string,
+    forwardResult: ForwardSignalResult,
+    status: 'accepted' | 'resent' | 'resend_failed',
+  ) {
+    return {
+      status,
+      signalId,
+      submittedAt,
+      entryRange: { min: dto.entryMin, max: dto.entryMax },
+      execution: {
+        forwarded: forwardResult.forwarded,
+        hubError:
+          forwardResult.hubError ||
+          (forwardResult.forwarded
+            ? undefined
+            : 'Signal Hub did not accept this setup'),
+        sendername: this.signalHub.toSenderName(displayName, userId),
+        orderType:
+          (forwardResult.hub?.payload?.order_type as string | undefined) ||
+          undefined,
+      },
+      executionHub: forwardResult.hub
+        ? {
+            id: forwardResult.hub.id,
+            status: forwardResult.hub.status,
+            duplicate: forwardResult.hub.duplicate,
+            progress: forwardResult.hub.progress,
+          }
+        : null,
+      executionValidation: {
+        approved: forwardResult.validation.approved,
+        adjusted: forwardResult.validation.adjusted,
+        issues: forwardResult.validation.issues,
+        rejectReason: forwardResult.validation.rejectReason,
+        sentPrices: forwardResult.validation.sentPrices,
+      },
+    };
+  }
+
+  async getUserSignals(userId: string) {
+    return this.prisma.signal.findMany({
+      where: { userId },
+      orderBy: { submittedAt: 'desc' },
+    });
+  }
+
+  async getSignal(signalId: string, userId: string, role: string) {
+    const signal = await this.prisma.signal.findUnique({
+      where: { signalId },
+      include: { trade: true, tradeScore: true },
+    });
+
+    if (!signal) throw new BadRequestException('Signal not found');
+
+    if (
+      signal.userId !== userId &&
+      role !== 'ADMIN' &&
+      role !== 'MODERATOR'
+    ) {
+      throw new ForbiddenException('You do not have access to this signal');
+    }
+
+    return signal;
+  }
+
+  async getOpenSignals(userId: string) {
+    return this.prisma.signal.findMany({
+      where: { userId, status: 'OPEN' },
+      include: { trade: true },
+      orderBy: { submittedAt: 'desc' },
+    });
+  }
+
+  async getOpenSignalsWithResolution(userId: string) {
+    const open = await this.getOpenSignals(userId);
+    const items = await Promise.all(
+      open.map(async (signal) => ({
+        id: signal.id,
+        signalId: signal.signalId,
+        symbol: signal.symbol,
+        direction: signal.direction,
+        entryMin: Number(signal.entryMin),
+        entryMax: Number(signal.entryMax),
+        stopLoss: Number(signal.stopLoss),
+        takeProfit: Number(signal.takeProfit),
+        submittedAt: signal.submittedAt,
+        activated: Boolean(signal.trade?.activatedAt),
+        resolution: await this.getSetupResolution(userId, signal.signalId),
+      })),
+    );
+    return {
+      items,
+      count: items.length,
+      claimableCount: items.filter((i) => i.resolution.claimable).length,
+    };
+  }
+
+  async listClaimableTpSetups(userId: string) {
+    const open = await this.prisma.signal.findMany({
+      where: { userId, status: 'OPEN' },
+      include: { trade: true },
+      orderBy: { submittedAt: 'desc' },
+    });
+
+    const items = await Promise.all(
+      open.map(async (signal) => {
+        const resolution = await this.getSetupResolution(userId, signal.signalId);
+        return {
+          signalId: signal.signalId,
+          symbol: signal.symbol,
+          direction: signal.direction,
+          entryMin: Number(signal.entryMin),
+          entryMax: Number(signal.entryMax),
+          stopLoss: Number(signal.stopLoss),
+          takeProfit: Number(signal.takeProfit),
+          submittedAt: signal.submittedAt.toISOString(),
+          oneToOnePrice: resolution.oneToOnePrice,
+          currentPrice: resolution.currentPrice ?? resolution.metaApiPrice ?? null,
+          canClaimFullTp: Boolean(resolution.canClaimTp),
+          canClaimTp1R1: Boolean(resolution.canClaimTp1R1),
+          claimable: Boolean(resolution.canClaimTp || resolution.canClaimTp1R1),
+          executionPhase: resolution.executionPhase,
+          executionLabel: resolution.executionLabel,
+          breakevenSet: Boolean(resolution.breakevenSet),
+          tp1ClaimBlockedReason: resolution.tp1ClaimBlockedReason,
+        };
+      }),
+    );
+
+    const claimable = items.filter((i) => i.claimable);
+
+    return {
+      items: claimable,
+      count: claimable.length,
+    };
+  }
+
+  /** Admin: manually queue limit/stop for a submitted OPEN setup (MetaAPI first, Hub fallback). */
+  async adminSetSetupLimit(signalId: string) {
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId },
+      include: {
+        trade: true,
+        user: {
+          select: {
+            displayName: true,
+            metaApiAccountId: true,
+            status: true,
+            registrationPaid: true,
+            virtualAccount: {
+              select: { riskPercent: true, maxRiskPerTrade: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!signal) throw new NotFoundException('Setup not found');
+    if (!signal.user || !signal.trade) {
+      throw new BadRequestException('Setup has no trader or trade record');
+    }
+    if (signal.status !== 'OPEN') {
+      throw new BadRequestException(
+        `Only OPEN setups can receive limits (current: ${signal.status})`,
+      );
+    }
+    if (signal.trade.closedAt) {
+      throw new BadRequestException('This trade is already closed');
+    }
+    if (signal.trade.activatedAt) {
+      throw new BadRequestException(
+        'This setup already has a running trade — cannot place a new limit',
+      );
+    }
+
+    const metaEnabled = this.metaApi.isConfigured;
+    const hubEnabled = this.signalHub.isConfigured;
+    if (!metaEnabled && !hubEnabled) {
+      throw new ServiceUnavailableException(
+        'Neither MetaAPI nor Signal Hub is configured',
+      );
+    }
+
+    if (metaEnabled) {
+      const metaResult = await this.ensureMetaApiPendingLimitForSetup(
+        signal,
+        signal.user,
+        signal.userId,
+      );
+      if (metaResult.status === 'placed') {
+        return {
+          ok: true,
+          signalId,
+          channel: 'metaapi' as const,
+          outcome: 'placed' as const,
+          orderType: metaResult.orderType,
+          entry: metaResult.entry,
+          message: `MetaAPI ${metaResult.orderType} placed @ ${metaResult.entry}`,
+        };
+      }
+      if (metaResult.status === 'has_order') {
+        return {
+          ok: true,
+          signalId,
+          channel: 'metaapi' as const,
+          outcome: 'already_active' as const,
+          orderType: metaResult.orderType,
+          entry: metaResult.entry,
+          message:
+            'MetaAPI already has a pending or open order for this setup',
+        };
+      }
+    }
+
+    if (hubEnabled) {
+      const evaluation = await this.evaluateActiveSetupHubOrder({
+        signal,
+        userId: signal.userId,
+        user: signal.user,
+      });
+
+      if (evaluation.action === 'has_order') {
+        return {
+          ok: true,
+          signalId,
+          channel: 'hub' as const,
+          outcome: 'already_active' as const,
+          orderType: evaluation.order.orderType,
+          entry: evaluation.order.entry,
+          message: 'Signal Hub already has a pending order for this setup',
+        };
+      }
+
+      if (evaluation.action === 'skip') {
+        return {
+          ok: false,
+          signalId,
+          channel: null,
+          outcome: 'failed' as const,
+          message: evaluation.reason,
+        };
+      }
+
+      const dto = this.signalToCreateDto(signal);
+      const forwardResult = await this.signalHub.forwardSignal(
+        signal.signalId,
+        dto,
+        signal.user.displayName,
+        signal.userId,
+      );
+      await this.persistHubForward(
+        signal.id,
+        signal.user.displayName,
+        signal.userId,
+        forwardResult,
+      );
+
+      if (forwardResult.forwarded) {
+        const order = this.orderDetailsFromForward(forwardResult);
+        if (order) {
+          await this.notifyHubOrderPlaced(signal, signal.userId, order);
+        }
+        return {
+          ok: true,
+          signalId,
+          channel: 'hub' as const,
+          outcome: 'placed' as const,
+          orderType: order?.orderType,
+          entry: order?.entry,
+          message: 'Limit queued on Signal Hub',
+        };
+      }
+
+      return {
+        ok: false,
+        signalId,
+        channel: 'hub' as const,
+        outcome: 'failed' as const,
+        message:
+          forwardResult.hubError || 'Signal Hub did not accept this setup',
+      };
+    }
+
+    return {
+      ok: false,
+      signalId,
+      channel: null,
+      outcome: 'failed' as const,
+      message: 'MetaAPI could not place a limit and Signal Hub is not configured',
+    };
+  }
+
+  /** Admin: manually mirror an OPEN setup to the MT5 copy pool (independent of set-limit). */
+  async adminMirrorSetupToCopy(signalId: string) {
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId },
+      include: {
+        trade: true,
+        user: { select: { id: true, displayName: true } },
+      },
+    });
+
+    if (!signal) throw new NotFoundException('Setup not found');
+    if (!signal.user) {
+      throw new BadRequestException('Setup has no trader');
+    }
+    if (signal.status !== 'OPEN') {
+      throw new BadRequestException(
+        `Only OPEN setups can be sent to MT5 Copy (current: ${signal.status})`,
+      );
+    }
+    if (signal.trade?.closedAt) {
+      throw new BadRequestException('This trade is already closed');
+    }
+
+    const copySettings = await this.copyTrading.getCopySettings();
+    if (copySettings.copyTradesEnabled === false) {
+      return {
+        ok: false,
+        signalId,
+        mirrored: false,
+        copyStatus: null as string | null,
+        entryPrice:
+          signal.trade?.activatedAt && signal.trade.entryPrice != null
+            ? Number(signal.trade.entryPrice)
+            : signal.direction === 'BUY'
+              ? Number(signal.entryMin)
+              : Number(signal.entryMax),
+        message: 'Copy trading is paused — resume in MT5 Copy settings to mirror new trades',
+      };
+    }
+
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+    const limitEntry =
+      signal.direction === 'BUY' ? entryMin : entryMax;
+    const openPrice =
+      signal.trade?.activatedAt && signal.trade.entryPrice != null
+        ? Number(signal.trade.entryPrice)
+        : limitEntry;
+    const pending = !signal.trade?.activatedAt;
+
+    await this.mirrorToCopyPool({
+      signal,
+      user: signal.user,
+      openPrice,
+      pending,
+    });
+
+    const copyTrade = await this.prisma.copyTrade.findUnique({
+      where: { signalId: signal.id },
+    });
+
+    if (!copyTrade) {
+      return {
+        ok: false,
+        signalId,
+        mirrored: false,
+        copyStatus: null as string | null,
+        entryPrice: openPrice,
+        message:
+          'Copy mirror skipped — copy trading may be paused, trader may not be in the pool, copy account unavailable, or pool not ready',
+      };
+    }
+
+    if (copyTrade.status === 'FAILED') {
+      return {
+        ok: false,
+        signalId,
+        mirrored: false,
+        copyStatus: copyTrade.status,
+        entryPrice: openPrice,
+        message:
+          copyTrade.notes ||
+          'Copy mirror failed — check MT5 Copy dashboard for details',
+      };
+    }
+
+    if (copyTrade.status === 'OPEN' || copyTrade.status === 'PENDING') {
+      return {
+        ok: true,
+        signalId,
+        mirrored: true,
+        copyStatus: copyTrade.status,
+        entryPrice: openPrice,
+        message: `Sent to MT5 Copy (${copyTrade.status.toLowerCase()}) @ ${openPrice} for ${signal.symbol} ${signal.direction}`,
+      };
+    }
+
+    return {
+      ok: true,
+      signalId,
+      mirrored: false,
+      copyStatus: copyTrade.status,
+      entryPrice: openPrice,
+      message: `Copy trade already ${copyTrade.status.toLowerCase()} for this setup`,
+    };
+  }
+
+  /**
+   * Every minute: ensure OPEN setups have pending limits — MetaAPI first, Hub fallback.
+   */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async syncActiveSetupExecutionOrders() {
+    const hubEnabled = this.signalHub.isConfigured;
+    const metaEnabled = this.metaApi.isConfigured;
+    if (!hubEnabled && !metaEnabled) return;
+
+    const candidates = await this.prisma.signal.findMany({
+      where: {
+        status: 'OPEN',
+        limitAutoPlaceDisabled: false,
+        trade: { is: { closedAt: null } },
+        submittedAt: { lte: new Date(Date.now() - 15 * 1000) },
+        user: { status: 'ACTIVE', registrationPaid: true },
+      },
+      include: {
+        trade: true,
+        user: {
+          select: {
+            displayName: true,
+            metaApiAccountId: true,
+            status: true,
+            registrationPaid: true,
+            virtualAccount: {
+              select: { riskPercent: true, maxRiskPerTrade: true },
+            },
+          },
+        },
+      },
+      take: 50,
+      orderBy: { submittedAt: 'asc' },
+    });
+
+    for (const signal of candidates) {
+      if (!signal.user || !signal.trade) continue;
+      if (!this.isActiveTraderUser(signal.user)) continue;
+
+      try {
+        let coveredByMetaApi = false;
+
+        if (metaEnabled) {
+          const metaResult = await this.ensureMetaApiPendingLimitForSetup(
+            signal,
+            signal.user,
+            signal.userId,
+          );
+          coveredByMetaApi = this.metaApiLimitCovered(metaResult);
+          if (
+            metaResult.status === 'has_order' &&
+            !signal.hubOrderNotifiedAt
+          ) {
+            await this.notifyHubOrderPlaced(signal, signal.userId, {
+              orderType: metaResult.orderType,
+              entry: metaResult.entry,
+            });
+          }
+        }
+
+        if (hubEnabled && !coveredByMetaApi) {
+          await this.syncHubLimitForSignal(
+            signal,
+            signal.userId,
+            signal.user,
+          );
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Execution sync error for ${signal.signalId}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+  }
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async handleTp1Reached() {
+    const candidates = await this.prisma.signal.findMany({
+      where: {
+        status: 'OPEN',
+        tp1ClaimNoticeApprovedAt: { not: null },
+        trade: {
+          is: {
+            tp1NotifiedAt: null,
+          },
+        },
+      },
+      include: {
+        trade: true,
+        user: {
+          select: { displayName: true, metaApiAccountId: true },
+        },
+      },
+    });
+
+    if (candidates.length === 0) return;
+
+    for (const signal of candidates) {
+        if (!signal.trade || !signal.user) continue;
+
+        try {
+          const resolution = await this.getSetupResolution(
+            signal.userId,
+            signal.signalId,
+          );
+
+          if (!('tp1Reached' in resolution) || !resolution.tp1Reached) continue;
+
+          const trade = signal.trade;
+          let breakevenApplied = Boolean(trade.tp1BreakevenAt);
+          if (!trade.tp1BreakevenAt) {
+            await this.prisma.trade.update({
+              where: { id: trade.id },
+              data: { breakevenPending: true },
+            });
+            const beResult = await this.recordBreakevenAttempt(
+              signal.userId,
+              { ...signal, trade },
+              signal.user,
+            );
+            breakevenApplied = beResult.applied;
+          }
+
+          const oneToOnePrice = Number(resolution.oneToOnePrice);
+          const breakevenPrice =
+            trade.entryPrice != null
+              ? Number(trade.entryPrice)
+              : computeEntryMid(
+                  Number(signal.entryMin),
+                  Number(signal.entryMax),
+                );
+
+          await this.prisma.trade.update({
+            where: { id: trade.id },
+            data: { tp1NotifiedAt: new Date() },
+          });
+
+        const title = `TP1 reached on ${signal.symbol}`;
+        const body = breakevenApplied
+          ? `Price hit TP1 (1:1 RR at ${oneToOnePrice}). Stop loss was moved to breakeven (${breakevenPrice}). Submit your 1:1 RR claim on TP Claims — no payout or KYC required to claim.`
+          : `Price hit TP1 (1:1 RR at ${oneToOnePrice}). Submit your 1:1 RR claim on TP Claims — no payout or KYC required to claim.`;
+
+        await this.platformNotifications.create({
+          userId: signal.userId,
+          type: 'TP1_REACHED',
+          title,
+          body,
+          linkUrl: '/tp-claims',
+          signalId: signal.signalId,
+        });
+
+        this.notifications.tp1ClaimAvailable(signal.userId, {
+          symbol: signal.symbol,
+          signalId: signal.signalId,
+          oneToOnePrice,
+          breakevenApplied,
+          breakevenPrice: breakevenApplied ? breakevenPrice : undefined,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `TP1 handling skipped for ${signal.signalId}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+  }
+
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async expireStaleOpenSetups() {
+    const cutoff = new Date(Date.now() - SETUP_MAX_AGE_MS);
+
+    const stale = await this.prisma.signal.findMany({
+      where: {
+        status: 'OPEN',
+        submittedAt: { lte: cutoff },
+        // Setups with a claim awaiting review stay open until an admin decides.
+        tpClaims: { none: { status: 'PENDING_REVIEW' } },
+      },
+      include: {
+        trade: true,
+        user: { select: { id: true, displayName: true, metaApiAccountId: true } },
+      },
+      take: 100,
+      orderBy: { submittedAt: 'asc' },
+    });
+
+    let expiredCount = 0;
+    for (const signal of stale) {
+      if (!signal.user) continue;
+      try {
+        const expired = await this.systemExpireOpenSetup(signal, signal.user);
+        if (expired) expiredCount += 1;
+      } catch (err) {
+        this.logger.warn(
+          `Setup expiry failed for ${signal.signalId}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    const deletedDrafts = await this.prisma.signalDraft.deleteMany({
+      where: { updatedAt: { lte: cutoff } },
+    });
+
+    if (expiredCount > 0 || deletedDrafts.count > 0) {
+      this.logger.log(
+        `Setup expiry sweep: archived ${expiredCount} setup(s), removed ${deletedDrafts.count} draft(s) older than ${SETUP_MAX_AGE_MS / 3600000}h`,
+      );
+    }
+  }
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async retryPendingBreakeven() {
+    const pending = await this.prisma.signal.findMany({
+      where: {
+        status: 'OPEN',
+        trade: {
+          is: {
+            tp1BreakevenAt: null,
+            breakevenPending: true,
+            breakevenRetryCount: { lt: MAX_BREAKEVEN_RETRIES },
+          },
+        },
+      },
+      include: {
+        trade: true,
+        user: {
+          select: { displayName: true, metaApiAccountId: true },
+        },
+      },
+    });
+
+    for (const signal of pending) {
+      if (!signal.trade || !signal.user) continue;
+      try {
+        const result = await this.recordBreakevenAttempt(
+          signal.userId,
+          { ...signal, trade: signal.trade },
+          signal.user,
+        );
+        if (result.applied) {
+          await this.platformNotifications.create({
+            userId: signal.userId,
+            type: 'BREAKEVEN_SET',
+            title: `Breakeven set on ${signal.symbol}`,
+            body: `Stop loss moved to ${result.breakevenPrice} after ${result.retriesUsed} attempt(s).`,
+            linkUrl: '/dashboard',
+            signalId: signal.signalId,
+          });
+        } else if (result.retriesRemaining <= 0) {
+          await this.platformNotifications.create({
+            userId: signal.userId,
+            type: 'BREAKEVEN_FAILED',
+            title: `Breakeven not set on ${signal.symbol}`,
+            body: `Could not move stop to breakeven after ${MAX_BREAKEVEN_RETRIES} attempts — broker may reject until price allows it. Try again from the setup or use Set breakeven when conditions improve.`,
+            linkUrl: '/dashboard',
+            signalId: signal.signalId,
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Breakeven retry skipped for ${signal.signalId}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+  }
+
+  async setBreakeven(userId: string, signalId: string) {
+    await this.compliance.requireActiveTrader(userId);
+
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId, status: 'OPEN' },
+      include: { trade: true },
+    });
+    if (!signal?.trade) {
+      throw new NotFoundException('Open setup not found');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { displayName: true, metaApiAccountId: true },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    if (signal.trade.tp1BreakevenAt) {
+      return {
+        status: 'already_set' as const,
+        applied: true,
+        breakevenPrice: Number(signal.trade.stopLoss),
+        retriesUsed: signal.trade.breakevenRetryCount,
+        retriesRemaining: 0,
+        message: 'Breakeven is already set on this setup.',
+      };
+    }
+
+    if (signal.trade.breakevenRetryCount >= MAX_BREAKEVEN_RETRIES) {
+      await this.prisma.trade.update({
+        where: { id: signal.trade.id },
+        data: { breakevenRetryCount: 0 },
+      });
+      signal.trade.breakevenRetryCount = 0;
+    }
+
+    const resolution = await this.getSetupResolution(userId, signalId);
+    const liveTrade = resolution.liveTrade as { status?: string } | null | undefined;
+    const canSet =
+      liveTrade?.status === 'open' ||
+      Boolean(signal.trade.activatedAt) ||
+      Boolean(signal.metaApiExecutedAt) ||
+      Boolean(signal.hubRecordId);
+
+    if (!canSet) {
+      throw new BadRequestException(
+        'No live trade found for this setup — breakeven can only be set while a position is open.',
+      );
+    }
+
+    await this.prisma.trade.update({
+      where: { id: signal.trade.id },
+      data: { breakevenPending: true },
+    });
+
+    const result = await this.recordBreakevenAttempt(
+      userId,
+      { ...signal, trade: signal.trade },
+      user,
+    );
+
+    if (result.applied) {
+      return {
+        status: 'set' as const,
+        applied: true,
+        breakevenPrice: result.breakevenPrice,
+        retriesUsed: result.retriesUsed,
+        retriesRemaining: result.retriesRemaining,
+        message: `Stop loss moved to breakeven (${result.breakevenPrice}).`,
+      };
+    }
+
+    return {
+      status: 'pending' as const,
+      applied: false,
+      breakevenPrice: result.breakevenPrice,
+      retriesUsed: result.retriesUsed,
+      retriesRemaining: result.retriesRemaining,
+      message:
+        result.retriesRemaining > 0
+          ? `Broker did not accept breakeven yet — retrying automatically (${result.retriesUsed}/${MAX_BREAKEVEN_RETRIES} attempts used).`
+          : `Could not set breakeven after ${MAX_BREAKEVEN_RETRIES} attempts.`,
+    };
+  }
+
+  async partialCloseSetupTrade(
+    userId: string,
+    signalId: string,
+    volume: number,
+  ) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    if (!this.metaApi.isConfigured) {
+      throw new ServiceUnavailableException('Live trading is not configured');
+    }
+
+    if (!Number.isFinite(volume) || volume <= 0) {
+      throw new BadRequestException('Volume must be greater than zero');
+    }
+
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId, status: 'OPEN' },
+      include: { trade: true },
+    });
+    if (!signal?.trade) {
+      throw new NotFoundException('Open setup not found');
+    }
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    const accountId = this.metaApi.resolveAccountId(
+      signal.metaApiAccountId ?? user.metaApiAccountId,
+    );
+    if (!accountId) {
+      throw new BadRequestException('Platform trading account is not configured');
+    }
+
+    const account = await this.metaApi.ensureAccountReady(accountId);
+    const { clientId } = this.metaApi.buildIdentifiersForUser(
+      user.displayName,
+      userId,
+      signal.signalId,
+      signal.symbol,
+    );
+    const live = await this.metaApi.findLiveTradeForSignal(account, {
+      positionId: signal.metaApiPositionId,
+      orderId: signal.metaApiOrderId,
+      clientId,
+      displayName: user.displayName,
+      userId,
+      symbol: signal.symbol,
+      activated: Boolean(signal.trade.activatedAt),
+    });
+
+    if (live.status !== 'open' || !live.positionId) {
+      throw new BadRequestException(
+        'No open running position found for this setup',
+      );
+    }
+
+    const openVolume = live.volume ?? 0;
+    if (volume >= openVolume) {
+      throw new BadRequestException(
+        `Partial volume must be less than open size (${openVolume} lots) — use Close for full exit`,
+      );
+    }
+
+    await this.metaApi.closePositionPartialById(
+      account,
+      live.positionId,
+      volume,
+    );
+
+    await this.prisma.trade.update({
+      where: { id: signal.trade.id },
+      data: {
+        partialClosedAt: new Date(),
+        partialCloseVolume: volume,
+      },
+    });
+
+    this.notifications.tradePartialClose(userId, {
+      symbol: signal.symbol,
+      signalId: signal.signalId,
+      volume,
+      message: `Partial close ${volume} lot(s) on ${signal.symbol} via MT5`,
+    });
+
+    return {
+      status: 'partial',
+      signalId: signal.signalId,
+      volume,
+      positionId: live.positionId,
+      message: `Closed ${volume} lot(s) — position still running`,
+    };
+  }
+
+  async updateSetupStops(
+    userId: string,
+    signalId: string,
+    dto: UpdateSetupStopsDto,
+  ) {
+    await this.compliance.requireActiveTrader(userId);
+
+    if (dto.stopLoss === undefined && dto.takeProfit === undefined) {
+      throw new BadRequestException('Provide stopLoss and/or takeProfit to update');
+    }
+
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId, status: 'OPEN' },
+      include: { trade: true },
+    });
+    if (!signal?.trade) {
+      throw new NotFoundException('Open setup not found');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { displayName: true, metaApiAccountId: true },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+    const nextSl =
+      dto.stopLoss !== undefined ? dto.stopLoss : Number(signal.stopLoss);
+    const nextTp =
+      dto.takeProfit !== undefined ? dto.takeProfit : Number(signal.takeProfit);
+
+    const resolution = await this.getSetupResolution(userId, signalId);
+    if (!resolution.canAdjustStops) {
+      throw new BadRequestException(
+        'Stop levels can only be adjusted while a live order or open position exists for this setup.',
+      );
+    }
+
+    const live = resolution.liveTrade as {
+      status?: string;
+      positionId?: string;
+      orderId?: string;
+      openPrice?: number;
+      entryPrice?: number;
+      stopLoss?: number;
+      takeProfit?: number;
+    } | null;
+
+    const openPx =
+      live?.openPrice ??
+      live?.entryPrice ??
+      (signal.trade?.entryPrice != null
+        ? Number(signal.trade.entryPrice)
+        : null);
+
+    if (live?.status === 'open' && openPx != null && Number.isFinite(openPx)) {
+      this.validatePositionStopLevels(
+        signal.direction,
+        openPx,
+        dto.stopLoss !== undefined ? nextSl : undefined,
+        dto.takeProfit !== undefined ? nextTp : undefined,
+      );
+    } else {
+      this.validateLiveStopLevels(
+        signal.direction,
+        entryMin,
+        entryMax,
+        nextSl,
+        nextTp,
+      );
+    }
+
+    let metaApplied = false;
+    let hubApplied = false;
+
+    const accountId = this.metaApi.resolveAccountId(
+      signal.metaApiAccountId ?? user.metaApiAccountId,
+    );
+
+    if (this.metaApi.isConfigured && accountId && live) {
+      try {
+        const account = await this.metaApi.ensureAccountReady(accountId);
+        const spec = await this.metaApi.getSymbolSpecification(
+          account,
+          signal.symbol,
+        );
+        const specDigits = spec.digits;
+        if (live.status === 'open' && live.positionId) {
+          await this.metaApi.modifyPositionStops(account, {
+            positionId: live.positionId,
+            ...(dto.stopLoss !== undefined ? { stopLoss: nextSl } : {}),
+            ...(dto.takeProfit !== undefined ? { takeProfit: nextTp } : {}),
+            specDigits,
+          });
+          metaApplied = true;
+        } else if (live.status === 'pending' && live.orderId) {
+          await this.metaApi.modifyPendingOrderStops(account, {
+            orderId: live.orderId,
+            ...(dto.stopLoss !== undefined ? { stopLoss: nextSl } : {}),
+            ...(dto.takeProfit !== undefined ? { takeProfit: nextTp } : {}),
+            specDigits,
+          });
+          metaApplied = true;
+        }
+      } catch (err) {
+        this.logger.warn(
+          `MetaAPI stop update failed for ${signal.signalId}: ${err instanceof Error ? err.message : err}`,
+        );
+        if (!signal.hubRecordId) {
+          throw new BadRequestException(
+            err instanceof BadRequestException
+              ? err.message
+              : `Broker could not update stops: ${err instanceof Error ? err.message : 'broker rejected'}`,
+          );
+        }
+      }
+    }
+
+    if (this.signalHub.isConfigured && signal.hubRecordId) {
+      const sendername =
+        signal.hubSenderName ||
+        this.signalHub.toSenderName(user.displayName, userId);
+      const { hub, error } = await this.signalHub.sendHubAction(sendername, {
+        action: 'modify',
+        external_id: signal.signalId,
+        symbol: signal.symbol,
+        sl: nextSl,
+        tp: nextTp,
+      });
+      if (hub) hubApplied = true;
+      if (error && !metaApplied) {
+        throw new BadRequestException(
+          `Could not update stops on broker: ${error}`,
+        );
+      }
+    }
+
+    if (!metaApplied && !hubApplied) {
+      throw new BadRequestException(
+        'No broker connection available to update stop levels for this setup.',
+      );
+    }
+
+    const rr = this.computeRiskRewardForSetup(
+      signal.direction,
+      entryMin,
+      entryMax,
+      nextSl,
+      nextTp,
+    );
+
+    const slChanged =
+      dto.stopLoss !== undefined &&
+      Math.abs(nextSl - Number(signal.stopLoss)) > 1e-9;
+
+    await this.prisma.$transaction([
+      this.prisma.signal.update({
+        where: { id: signal.id },
+        data: {
+          stopLoss: nextSl,
+          takeProfit: nextTp,
+          riskRewardRatio: rr,
+        },
+      }),
+      this.prisma.trade.update({
+        where: { id: signal.trade.id },
+        data: {
+          stopLoss: nextSl,
+          takeProfit: nextTp,
+          ...(slChanged ? { tp1BreakevenAt: null, breakevenPending: false } : {}),
+        },
+      }),
+    ]);
+
+    return {
+      status: 'updated',
+      signalId: signal.signalId,
+      stopLoss: nextSl,
+      takeProfit: nextTp,
+      riskRewardRatio: rr,
+      metaApiUpdated: metaApplied,
+      hubUpdated: hubApplied,
+      brokerStopLoss: live?.stopLoss ?? null,
+      brokerTakeProfit: live?.takeProfit ?? null,
+      message: `Stop levels updated to SL ${nextSl}, TP ${nextTp}${metaApplied ? ' on broker' : ''}${hubApplied ? ' on Signal Hub' : ''}.`,
+    };
+  }
+
+  private validateLiveStopLevels(
+    direction: TradeDirection,
+    entryMin: number,
+    entryMax: number,
+    stopLoss: number,
+    takeProfit: number,
+  ) {
+    if (!Number.isFinite(stopLoss) || !Number.isFinite(takeProfit)) {
+      throw new BadRequestException('Stop loss and take profit must be valid numbers');
+    }
+
+    if (direction === 'BUY') {
+      if (stopLoss >= entryMin) {
+        throw new BadRequestException(
+          'For BUY setups, stop loss must be below the entry range',
+        );
+      }
+      if (takeProfit <= entryMax) {
+        throw new BadRequestException(
+          'For BUY setups, take profit must be above the entry range',
+        );
+      }
+    } else {
+      if (stopLoss <= entryMax) {
+        throw new BadRequestException(
+          'For SELL setups, stop loss must be above the entry range',
+        );
+      }
+      if (takeProfit >= entryMin) {
+        throw new BadRequestException(
+          'For SELL setups, take profit must be below the entry range',
+        );
+      }
+    }
+  }
+
+  private validatePositionStopLevels(
+    direction: TradeDirection,
+    openPrice: number,
+    stopLoss: number | undefined,
+    takeProfit: number | undefined,
+  ) {
+    if (!Number.isFinite(openPrice)) {
+      throw new BadRequestException('Open price is required to validate stop levels');
+    }
+
+    if (direction === 'BUY') {
+      if (stopLoss != null && Number.isFinite(stopLoss) && stopLoss > openPrice) {
+        throw new BadRequestException(
+          'For BUY positions, stop loss cannot be above the entry price',
+        );
+      }
+      if (takeProfit != null && Number.isFinite(takeProfit) && takeProfit <= openPrice) {
+        throw new BadRequestException(
+          'For BUY positions, take profit must be above the entry price',
+        );
+      }
+    } else {
+      if (stopLoss != null && Number.isFinite(stopLoss) && stopLoss < openPrice) {
+        throw new BadRequestException(
+          'For SELL positions, stop loss cannot be below the entry price',
+        );
+      }
+      if (takeProfit != null && Number.isFinite(takeProfit) && takeProfit >= openPrice) {
+        throw new BadRequestException(
+          'For SELL positions, take profit must be below the entry price',
+        );
+      }
+    }
+  }
+
+  private computeRiskRewardForSetup(
+    direction: TradeDirection,
+    entryMin: number,
+    entryMax: number,
+    stopLoss: number,
+    takeProfit: number,
+  ): number {
+    void direction;
+    const mid = computeEntryMid(entryMin, entryMax);
+    const risk = Math.abs(mid - stopLoss);
+    const reward = Math.abs(takeProfit - mid);
+    if (risk <= 0) return 0;
+    return Math.round((reward / risk) * 100) / 100;
+  }
+
+  private async recordBreakevenAttempt(
+    userId: string,
+    signal: {
+      id: string;
+      signalId: string;
+      symbol: string;
+      direction: TradeDirection;
+      entryMin: unknown;
+      entryMax: unknown;
+      takeProfit: unknown;
+      hubRecordId: string | null;
+      hubSenderName: string | null;
+      metaApiAccountId: string | null;
+      metaApiOrderId: string | null;
+      metaApiPositionId: string | null;
+      trade: {
+        id: string;
+        entryPrice: unknown;
+        activatedAt: Date | null;
+        breakevenRetryCount: number;
+      };
+    },
+    user: { displayName: string; metaApiAccountId: string | null },
+  ): Promise<{
+    applied: boolean;
+    breakevenPrice: number;
+    retriesUsed: number;
+    retriesRemaining: number;
+  }> {
+    const attempt = await this.applyBreakevenOnSetup(userId, signal, user);
+
+    if (attempt.applied) {
+      await this.prisma.trade.update({
+        where: { id: signal.trade.id },
+        data: {
+          breakevenPending: false,
+        },
+      });
+      const retriesUsed = signal.trade.breakevenRetryCount;
+      return {
+        applied: true,
+        breakevenPrice: attempt.breakevenPrice,
+        retriesUsed,
+        retriesRemaining: Math.max(0, MAX_BREAKEVEN_RETRIES - retriesUsed),
+      };
+    }
+
+    const updated = await this.prisma.trade.update({
+      where: { id: signal.trade.id },
+      data: {
+        breakevenRetryCount: { increment: 1 },
+        breakevenPending:
+          signal.trade.breakevenRetryCount + 1 < MAX_BREAKEVEN_RETRIES,
+      },
+    });
+
+    const retriesUsed = updated.breakevenRetryCount;
+    return {
+      applied: false,
+      breakevenPrice: attempt.breakevenPrice,
+      retriesUsed,
+      retriesRemaining: Math.max(0, MAX_BREAKEVEN_RETRIES - retriesUsed),
+    };
+  }
+
+  private async applyBreakevenOnSetup(
+    userId: string,
+    signal: {
+      id: string;
+      signalId: string;
+      symbol: string;
+      direction: TradeDirection;
+      entryMin: unknown;
+      entryMax: unknown;
+      takeProfit: unknown;
+      hubRecordId: string | null;
+      hubSenderName: string | null;
+      metaApiAccountId: string | null;
+      metaApiOrderId: string | null;
+      metaApiPositionId: string | null;
+      trade: {
+        id: string;
+        entryPrice: unknown;
+        activatedAt: Date | null;
+      };
+    },
+    user: { displayName: string; metaApiAccountId: string | null },
+  ): Promise<{ applied: boolean; breakevenPrice: number }> {
+    const breakevenPrice =
+      signal.trade.entryPrice != null
+        ? Number(signal.trade.entryPrice)
+        : computeEntryMid(Number(signal.entryMin), Number(signal.entryMax));
+
+    let hubOk = false;
+    let metaOk = false;
+
+    if (this.signalHub.isConfigured && signal.hubRecordId) {
+      const sendername =
+        signal.hubSenderName ||
+        this.signalHub.toSenderName(user.displayName, userId);
+      const { hub, error } = await this.signalHub.sendHubAction(sendername, {
+        action: 'breakeven',
+        external_id: signal.signalId,
+        symbol: signal.symbol,
+      });
+      hubOk = Boolean(hub);
+      if (error) {
+        this.logger.warn(
+          `Hub breakeven failed for ${signal.signalId}: ${error}`,
+        );
+      }
+    }
+
+    const accountId = this.metaApi.resolveAccountId(
+      signal.metaApiAccountId ?? user.metaApiAccountId,
+    );
+    if (this.metaApi.isConfigured && accountId) {
+      try {
+        const account = await this.metaApi.ensureAccountReady(accountId);
+        const { clientId } = this.metaApi.buildIdentifiersForUser(
+          user.displayName,
+          userId,
+          signal.signalId,
+          signal.symbol,
+        );
+        const live = await this.metaApi.findLiveTradeForSignal(account, {
+          positionId: signal.metaApiPositionId,
+          orderId: signal.metaApiOrderId,
+          clientId,
+          displayName: user.displayName,
+          userId,
+          symbol: signal.symbol,
+          activated: Boolean(signal.trade.activatedAt),
+        });
+
+        if (live.status === 'open' && live.positionId) {
+          const positions = await this.metaApi.findUserOpenPositions(
+            account,
+            user.displayName,
+            userId,
+          );
+          const position = positions.find((p) => p.id === live.positionId);
+          await this.metaApi.modifyPositionStops(account, {
+            positionId: live.positionId,
+            stopLoss: breakevenPrice,
+            takeProfit:
+              position?.takeProfit != null
+                ? position.takeProfit
+                : Number(signal.takeProfit),
+          });
+          metaOk = true;
+        }
+      } catch (err) {
+        this.logger.warn(
+          `MetaAPI breakeven failed for ${signal.signalId}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    const applied = hubOk || metaOk;
+    if (applied) {
+      await this.prisma.$transaction([
+        this.prisma.signal.update({
+          where: { id: signal.id },
+          data: { stopLoss: breakevenPrice },
+        }),
+        this.prisma.trade.update({
+          where: { id: signal.trade.id },
+          data: {
+            stopLoss: breakevenPrice,
+            tp1BreakevenAt: new Date(),
+            breakevenPending: false,
+          },
+        }),
+      ]);
+      this.logger.log(
+        `TP1 breakeven set for ${signal.signalId} @ ${breakevenPrice} (hub=${hubOk}, meta=${metaOk})`,
+      );
+    }
+
+    return { applied, breakevenPrice };
+  }
+
+  async getSetupResolution(userId: string, signalId: string) {
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId },
+      include: { trade: true },
+    });
+    if (!signal) throw new NotFoundException('Signal not found');
+
+    const tp = Number(signal.takeProfit);
+    const sl = Number(signal.stopLoss);
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+    const oneToOnePrice = computeOneToOnePrice(
+      signal.direction,
+      entryMin,
+      entryMax,
+      sl,
+    );
+    const tradeProgressOutcome = resolveTradeProgressOutcome(
+      signal,
+      signal.trade,
+    );
+
+    if (signal.status !== 'OPEN') {
+      const { phase, label } = resolveSetupExecutionPhase({
+        signalStatus: signal.status,
+        hubExecuted: false,
+        activated: Boolean(signal.trade?.activatedAt),
+        partialClosed: Boolean(signal.trade?.partialClosedAt),
+        tradeClosedAt: signal.trade?.closedAt,
+        canClaimTp: false,
+        canClaimTp1R1: false,
+        canClaimSl: false,
+        pendingTpClaim: false,
+        tradeProgressOutcome,
+      });
+
+      return {
+        signalId: signal.signalId,
+        symbol: signal.symbol,
+        direction: signal.direction,
+        status: signal.status,
+        takeProfit: tp,
+        stopLoss: sl,
+        entryMin,
+        entryMax,
+        oneToOnePrice,
+        riskRewardRatio: Number(signal.riskRewardRatio),
+        claimable: false,
+        canClaimTp: false,
+        canClaimTp1R1: false,
+        canClaimSl: false,
+        tradeOpened: Boolean(signal.trade?.activatedAt),
+        partialClosed: Boolean(signal.trade?.partialClosedAt),
+        executionPhase: phase,
+        executionLabel: label,
+        tradeProgressOutcome,
+        resolvedAt: signal.resolvedAt?.toISOString() ?? null,
+        exitPrice:
+          signal.trade?.exitPrice != null
+            ? Number(signal.trade.exitPrice)
+            : null,
+        pnl: signal.pnl != null ? Number(signal.pnl) : null,
+        pointsAwarded: signal.pointsAwarded,
+        reason: 'Setup is already resolved',
+      };
+    }
+
+    const rr1Valid = isOneToOneClaimValidForSetup(
+      signal.direction,
+      oneToOnePrice,
+      tp,
+    );
+
+    const trader = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { metaApiAccountId: true, displayName: true },
+    });
+    const linkedAccountId = this.metaApi.resolveAccountId(
+      trader?.metaApiAccountId,
+    );
+
+    const liveTrade = trader
+      ? await this.resolveSetupLiveTrade(
+          signal,
+          userId,
+          trader,
+          oneToOnePrice,
+          null,
+        )
+      : null;
+
+    let price = await this.priceMonitor.fetchPrice(signal.symbol);
+    let metaApiPrice: number | null =
+      liveTrade && typeof liveTrade.currentPrice === 'number'
+        ? liveTrade.currentPrice
+        : null;
+
+    if (metaApiPrice === null && trader && this.metaApi.isConfigured) {
+      metaApiPrice = await this.fetchMetaApiMarkPrice(
+        signal,
+        trader,
+        linkedAccountId,
+      );
+    }
+
+    if (price === null && metaApiPrice !== null) {
+      price = metaApiPrice;
+    }
+
+    const priceOutcome =
+      price !== null
+        ? this.priceMonitor.outcomeAtPrice(signal.direction, tp, sl, price)
+        : null;
+
+    let hubStatus: string | null = null;
+    let hubOutcome: SetupOutcome | null = null;
+    let hubExecuted = false;
+    if (this.signalHub.isConfigured && trader) {
+      const sendername = this.signalHub.toSenderName(trader.displayName, userId);
+      const hub = await this.signalHub.getByExternalId(signal.signalId, sendername);
+      hubStatus = hub?.status ?? null;
+      hubExecuted = Boolean(hub?.progress?.executed);
+      hubOutcome = await this.inferHubOutcome(sendername, hub);
+
+      if (!hubOutcome && hubExecuted && hubStatus === 'failed') {
+        hubOutcome = 'sl';
+      }
+    }
+
+    const canClaimTpBase =
+      priceOutcome === 'tp' || (priceOutcome === null && hubOutcome === 'tp');
+    const canClaimSlBase =
+      priceOutcome === 'sl' || (priceOutcome === null && hubOutcome === 'sl');
+
+    const pendingTpClaim = await this.tpClaims.hasPendingClaim(signal.id);
+    const existingFullTpClaim = await this.prisma.tpClaim.findFirst({
+      where: {
+        signalId: signal.id,
+        claimType: 'FULL_TP',
+        status: { not: 'REJECTED' },
+      },
+    });
+    const existingRr1Claim = await this.prisma.tpClaim.findFirst({
+      where: {
+        signalId: signal.id,
+        claimType: 'RR_1_TO_1',
+        status: { not: 'REJECTED' },
+      },
+    });
+    const activated =
+      Boolean(signal.trade?.activatedAt) ||
+      liveTrade?.status === 'open' ||
+      liveTrade?.status === 'pending';
+    const partialClosed = Boolean(signal.trade?.partialClosedAt);
+    const breakevenSet = Boolean(signal.trade?.tp1BreakevenAt);
+    const hitRr1 =
+      (price !== null &&
+        priceReachedOneToOne(signal.direction, oneToOnePrice, price)) ||
+      Boolean(liveTrade?.tp1Reached);
+    const tp1Eligible =
+      (hitRr1 || partialClosed) && breakevenSet;
+    const canClaimTp =
+      canClaimTpBase && !pendingTpClaim && !existingFullTpClaim;
+    const canClaimTp1R1 =
+      !canClaimTpBase &&
+      tp1Eligible &&
+      rr1Valid &&
+      activated &&
+      Number(signal.riskRewardRatio) >= 1 &&
+      !pendingTpClaim &&
+      !existingRr1Claim;
+    const canClaimSl = canClaimSlBase;
+    const tp1Reached =
+      !canClaimTpBase &&
+      (hitRr1 || partialClosed) &&
+      rr1Valid &&
+      activated &&
+      Number(signal.riskRewardRatio) >= 1;
+    const tp1ClaimBlockedReason = resolveTp1ClaimBlockedReason({
+      hitRr1,
+      partialClosed,
+      breakevenSet,
+      breakevenPending: Boolean(signal.trade?.breakevenPending),
+      rr1Valid,
+      activated,
+      canClaimTpBase,
+      pendingTpClaim,
+      existingRr1Claim: Boolean(existingRr1Claim),
+    });
+
+    const { canInvalidate, invalidateBlockedReason } =
+      this.resolveInvalidateEligibility({
+        liveTrade,
+        hubExecuted,
+        hubStatus,
+        hubRecordId: signal.hubRecordId,
+      });
+
+    const { phase, label } = resolveSetupExecutionPhase({
+      signalStatus: signal.status,
+      hubRecordId: signal.hubRecordId,
+      hubStatus,
+      hubExecuted,
+      liveTradeStatus:
+        typeof liveTrade?.status === 'string' ? liveTrade.status : undefined,
+      activated,
+      partialClosed,
+      tradeClosedAt: signal.trade?.closedAt,
+      canClaimTp,
+      canClaimTp1R1,
+      canClaimSl,
+      pendingTpClaim,
+      tradeProgressOutcome,
+    });
+
+    return {
+      signalId: signal.signalId,
+      symbol: signal.symbol,
+      direction: signal.direction,
+      status: signal.status,
+      takeProfit: tp,
+      stopLoss: sl,
+      entryMin,
+      entryMax,
+      oneToOnePrice,
+      riskRewardRatio: Number(signal.riskRewardRatio),
+      activated,
+      tradeOpened: activated,
+      partialClosed,
+      executionPhase: phase,
+      executionLabel: label,
+      tradeProgressOutcome,
+      currentPrice: price,
+      metaApiPrice,
+      priceOutcome,
+      hubStatus,
+      hubOutcome,
+      pendingTpClaim,
+      claimable: canClaimTp || canClaimSl || canClaimTp1R1,
+      canClaimTp,
+      canClaimTp1R1,
+      canClaimSl,
+      tp1Reached,
+      tp1ClaimBlockedReason,
+      breakevenSet,
+      breakevenPending: Boolean(signal.trade?.breakevenPending),
+      breakevenRetryCount: signal.trade?.breakevenRetryCount ?? 0,
+      canSetBreakeven:
+        Boolean(signal.trade) &&
+        !signal.trade?.tp1BreakevenAt &&
+        (signal.trade?.breakevenRetryCount ?? 0) < MAX_BREAKEVEN_RETRIES &&
+        (activated ||
+          liveTrade?.status === 'open' ||
+          Boolean(signal.metaApiExecutedAt) ||
+          Boolean(signal.hubRecordId)),
+      canAdjustStops:
+        signal.status === 'OPEN' &&
+        Boolean(signal.trade) &&
+        (liveTrade?.status === 'open' ||
+          liveTrade?.status === 'pending' ||
+          Boolean(signal.trade?.activatedAt) ||
+          Boolean(signal.metaApiExecutedAt) ||
+          Boolean(signal.hubRecordId)),
+      metaApiExecuted: Boolean(signal.metaApiExecutedAt),
+      metaApiOrderId: signal.metaApiOrderId,
+      metaApiPositionId: signal.metaApiPositionId,
+      canPlaceTrade:
+        signal.status === 'OPEN' &&
+        !signal.metaApiExecutedAt &&
+        this.metaApi.isConfigured &&
+        Boolean(linkedAccountId),
+      canCloseTrade:
+        liveTrade?.status === 'open' ||
+        liveTrade?.status === 'pending' ||
+        ((Boolean(signal.metaApiExecutedAt) || hubExecuted) &&
+          this.metaApi.isConfigured &&
+          Boolean(linkedAccountId)),
+      liveTrade,
+      canInvalidate,
+      invalidateBlockedReason,
+    };
+  }
+
+  private resolveInvalidateEligibility(input: {
+    liveTrade: Record<string, unknown> | null;
+    hubExecuted: boolean;
+    hubStatus: string | null;
+    hubRecordId: string | null;
+  }): { canInvalidate: boolean; invalidateBlockedReason?: string } {
+    const liveStatus = input.liveTrade?.status;
+
+    if (liveStatus === 'open') {
+      return {
+        canInvalidate: false,
+        invalidateBlockedReason:
+          'You have a live position on this setup. Close the trade first, then you can invalidate.',
+      };
+    }
+
+    if (liveStatus === 'pending') {
+      return {
+        canInvalidate: false,
+        invalidateBlockedReason:
+          'You have a pending order on this setup. Cancel it with Close trade first.',
+      };
+    }
+
+    if (input.hubExecuted) {
+      return {
+        canInvalidate: false,
+        invalidateBlockedReason:
+          'Signal Hub has an active trade on this setup. Wait for TP/SL or close the position before invalidating.',
+      };
+    }
+
+    if (input.hubRecordId) {
+      const status = (input.hubStatus ?? '').toLowerCase();
+      const terminal = [
+        'invalidated',
+        'failed',
+        'cancelled',
+        'canceled',
+        'closed',
+        'rejected',
+        'expired',
+        'done',
+        'not_found',
+      ];
+      if (status && !terminal.some((t) => status.includes(t))) {
+        return {
+          canInvalidate: false,
+          invalidateBlockedReason:
+            'Signal Hub still has a pending order for this setup. Wait for it to fill or cancel on Hub before invalidating.',
+        };
+      }
+    }
+
+    return { canInvalidate: true };
+  }
+
+  private async assertSetupCanInvalidate(
+    userId: string,
+    signal: {
+      id: string;
+      signalId: string;
+      symbol: string;
+      direction: TradeDirection;
+      status: string;
+      hubRecordId: string | null;
+      hubSenderName: string | null;
+      metaApiAccountId: string | null;
+      metaApiOrderId: string | null;
+      metaApiPositionId: string | null;
+      metaApiExecutedAt: Date | null;
+      entryMin: unknown;
+      entryMax: unknown;
+      stopLoss: unknown;
+      trade: { activatedAt: Date | null; entryPrice: unknown } | null;
+    },
+    user: { displayName: string; metaApiAccountId: string | null },
+  ) {
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+    const sl = Number(signal.stopLoss);
+    const oneToOnePrice = computeOneToOnePrice(
+      signal.direction,
+      entryMin,
+      entryMax,
+      sl,
+    );
+
+    const liveTrade = await this.resolveSetupLiveTrade(
+      signal,
+      userId,
+      user,
+      oneToOnePrice,
+      null,
+    );
+
+    let hubExecuted = false;
+    let hubStatus: string | null = null;
+    if (this.signalHub.isConfigured) {
+      const sendername =
+        signal.hubSenderName ||
+        this.signalHub.toSenderName(user.displayName, userId);
+      const hub = await this.signalHub.getByExternalId(
+        signal.signalId,
+        sendername,
+      );
+      hubStatus = hub?.status ?? null;
+      hubExecuted = Boolean(hub?.progress?.executed);
+    }
+
+    const { canInvalidate, invalidateBlockedReason } =
+      this.resolveInvalidateEligibility({
+        liveTrade,
+        hubExecuted,
+        hubStatus,
+        hubRecordId: signal.hubRecordId,
+      });
+
+    if (!canInvalidate) {
+      throw new BadRequestException(
+        invalidateBlockedReason ??
+          'This setup has a running order or open trade and cannot be invalidated.',
+      );
+    }
+  }
+
+  private async fetchMetaApiMarkPrice(
+    signal: { symbol: string; direction: TradeDirection; metaApiAccountId: string | null },
+    trader: { metaApiAccountId: string | null },
+    linkedAccountId: string | null,
+  ): Promise<number | null> {
+    const accountId = signal.metaApiAccountId ?? linkedAccountId;
+    if (!accountId) return null;
+
+    try {
+      const account = await this.metaApi.getAccount(accountId);
+      return await this.metaApi.getMarkPrice(
+        account,
+        signal.symbol,
+        signal.direction,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `MetaAPI mark price failed for ${signal.symbol}: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+  }
+
+  private async verifyMetaApiTpClaim(
+    userId: string,
+    signal: {
+      signalId: string;
+      symbol: string;
+      direction: TradeDirection;
+      entryMin: unknown;
+      entryMax: unknown;
+      stopLoss: unknown;
+      takeProfit: unknown;
+      metaApiAccountId: string | null;
+      metaApiOrderId: string | null;
+      metaApiPositionId: string | null;
+      trade: { activatedAt: Date | null } | null;
+    },
+    user: { displayName: string; metaApiAccountId: string | null },
+    options: { fullTp: boolean },
+  ): Promise<{ metaApiClosed?: boolean }> {
+    if (!this.metaApi.isConfigured) return {};
+
+    const accountId = this.metaApi.resolveAccountId(
+      signal.metaApiAccountId ?? user.metaApiAccountId,
+    );
+    if (!accountId) return {};
+
+    const tp = Number(signal.takeProfit);
+    const account = await this.metaApi.getAccount(accountId);
+    const mark = await this.metaApi.getMarkPrice(
+      account,
+      signal.symbol,
+      signal.direction,
+    );
+
+    if (options.fullTp) {
+      const tpReached =
+        signal.direction === 'BUY' ? mark >= tp : mark <= tp;
+      if (!tpReached) {
+        throw new BadRequestException(
+          `Live price (${mark}) has not reached take profit (${tp}) yet`,
+        );
+      }
+
+      const closeResult = await this.metaApi.closeSignalTradeIfOpen({
+        accountId,
+        displayName: user.displayName,
+        userId,
+        signalId: signal.signalId,
+        symbol: signal.symbol,
+        metaApiPositionId: signal.metaApiPositionId,
+        metaApiOrderId: signal.metaApiOrderId,
+        tradeActivated: Boolean(signal.trade?.activatedAt),
+      });
+
+      return { metaApiClosed: closeResult.action === 'closed' };
+    }
+
+    const oneToOne = computeOneToOnePrice(
+      signal.direction,
+      Number(signal.entryMin),
+      Number(signal.entryMax),
+      Number(signal.stopLoss),
+    );
+    const rr1Reached = priceReachedOneToOne(
+      signal.direction,
+      oneToOne,
+      mark,
+    );
+    if (!rr1Reached) {
+      throw new BadRequestException(
+        `Live price (${mark}) has not reached 1:1 RR (${oneToOne}) yet`,
+      );
+    }
+
+    return {};
+  }
+
+  /** Lightweight MetaAPI poll — live P/L only, no Hub or claim resolution. */
+  async getSetupLiveTrade(userId: string, signalId: string) {
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId },
+      include: { trade: true },
+    });
+    if (!signal) throw new NotFoundException('Signal not found');
+    if (signal.status !== 'OPEN') {
+      return { signalId: signal.signalId, liveTrade: null };
+    }
+
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+    const sl = Number(signal.stopLoss);
+    const oneToOnePrice = computeOneToOnePrice(
+      signal.direction,
+      entryMin,
+      entryMax,
+      sl,
+    );
+
+    const trader = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { metaApiAccountId: true, displayName: true },
+    });
+    if (!trader) throw new NotFoundException('User not found');
+
+    const liveTrade = await this.resolveSetupLiveTrade(
+      signal,
+      userId,
+      trader,
+      oneToOnePrice,
+      null,
+    );
+
+    return { signalId: signal.signalId, liveTrade };
+  }
+
+  private async resolveSetupLiveTrade(
+    signal: {
+      id: string;
+      signalId: string;
+      symbol: string;
+      direction: TradeDirection;
+      status: string;
+      metaApiAccountId: string | null;
+      metaApiOrderId: string | null;
+      metaApiPositionId: string | null;
+      metaApiExecutedAt: Date | null;
+      trade: { activatedAt: Date | null; entryPrice: unknown } | null;
+    },
+    userId: string,
+    trader: { displayName: string; metaApiAccountId: string | null },
+    oneToOnePrice: number,
+    markPrice: number | null,
+  ): Promise<Record<string, unknown> | null> {
+    const linkedAccountId = this.metaApi.resolveAccountId(
+      trader.metaApiAccountId,
+    );
+
+    if (
+      signal.status !== 'OPEN' ||
+      !this.metaApi.isConfigured ||
+      !(signal.metaApiAccountId || linkedAccountId)
+    ) {
+      return null;
+    }
+
+    try {
+      const accountId = signal.metaApiAccountId ?? linkedAccountId!;
+      const account = await this.metaApi.getAccount(accountId);
+      const { clientId } = this.metaApi.buildIdentifiersForUser(
+        trader.displayName,
+        userId,
+        signal.signalId,
+        signal.symbol,
+      );
+      const live = await this.metaApi.findLiveTradeForSignal(account, {
+        positionId: signal.metaApiPositionId,
+        orderId: signal.metaApiOrderId,
+        clientId,
+        displayName: trader.displayName,
+        userId,
+        symbol: signal.symbol,
+        activated: Boolean(signal.trade?.activatedAt),
+      });
+
+      const priceForTp1 =
+        markPrice ??
+        live.currentPrice ??
+        null;
+      const tp1Reached =
+        priceForTp1 !== null &&
+        priceReachedOneToOne(signal.direction, oneToOnePrice, priceForTp1);
+
+      return {
+        ...live,
+        tp1Price: oneToOnePrice,
+        tp1Reached,
+        entryPrice:
+          live.openPrice ??
+          (signal.trade?.entryPrice != null
+            ? Number(signal.trade.entryPrice)
+            : undefined),
+        canClose: live.status === 'open' || live.status === 'pending',
+      };
+    } catch (err) {
+      this.logger.warn(
+        `Live trade state failed for ${signal.signalId}: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+  }
+
+  async closeSetupTrade(userId: string, signalId: string) {
+    await this.compliance.requireActiveTrader(userId);
+
+    if (!this.metaApi.isConfigured) {
+      throw new ServiceUnavailableException('Live trading is not configured');
+    }
+
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId, status: 'OPEN' },
+      include: { trade: true },
+    });
+    if (!signal) throw new NotFoundException('Open setup not found');
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    const accountId = this.metaApi.resolveAccountId(
+      signal.metaApiAccountId ?? user.metaApiAccountId,
+    );
+    if (!accountId) {
+      throw new BadRequestException('No trading account linked');
+    }
+
+    const account = await this.metaApi.ensureAccountReady(accountId);
+    const { clientId } = this.metaApi.buildIdentifiersForUser(
+      user.displayName,
+      userId,
+      signal.signalId,
+      signal.symbol,
+    );
+    const live = await this.metaApi.findLiveTradeForSignal(account, {
+      positionId: signal.metaApiPositionId,
+      orderId: signal.metaApiOrderId,
+      clientId,
+      displayName: user.displayName,
+      userId,
+      symbol: signal.symbol,
+      activated: Boolean(signal.trade?.activatedAt),
+    });
+
+    if (live.status === 'none') {
+      throw new BadRequestException(
+        'No open position with your name in the trade comment was found for this setup',
+      );
+    }
+
+    const entryMin = Number(signal.entryMin);
+    const entryMax = Number(signal.entryMax);
+    const tp = Number(signal.takeProfit);
+    const sl = Number(signal.stopLoss);
+    const oneToOnePrice = computeOneToOnePrice(
+      signal.direction,
+      entryMin,
+      entryMax,
+      sl,
+    );
+
+    if (live.status === 'pending' && live.orderId) {
+      await this.metaApi.cancelPendingOrder(account, live.orderId);
+      await this.prisma.signal.update({
+        where: { id: signal.id },
+        data: {
+          metaApiAccountId: null,
+          metaApiOrderId: null,
+          metaApiPositionId: null,
+          metaApiExecutedAt: null,
+        },
+      });
+      return {
+        status: 'cancelled',
+        signalId: signal.signalId,
+        message: 'Pending order cancelled — setup remains open',
+      };
+    }
+
+    if (!live.positionId) {
+      throw new BadRequestException('Could not resolve broker position id');
+    }
+
+    const quote = await this.metaApi.getSymbolPrice(account, signal.symbol);
+    const exitPrice =
+      signal.direction === 'BUY' ? quote.bid : quote.ask;
+
+    await this.metaApi.closePositionById(account, live.positionId);
+
+    await this.priceMonitor.ensureTradeActivated(
+      signal.trade!,
+      signal,
+      live.openPrice ?? exitPrice,
+    );
+
+    const hitFullTp =
+      this.priceMonitor.outcomeAtPrice(
+        signal.direction,
+        tp,
+        sl,
+        exitPrice,
+      ) === 'tp';
+    const manualOutcome = classifyManualCloseOutcome(
+      signal.direction,
+      entryMin,
+      entryMax,
+      oneToOnePrice,
+      exitPrice,
+    );
+
+    let result: Record<string, unknown>;
+    if (manualOutcome === 'tp') {
+      result = (await this.wallet.resolveAsManualWin(
+        userId,
+        signal.id,
+        exitPrice,
+        { fullTp: hitFullTp },
+      )) as Record<string, unknown>;
+    } else if (manualOutcome === 'even') {
+      result = (await this.wallet.resolveAsEven(
+        userId,
+        signal.id,
+        exitPrice,
+      )) as Record<string, unknown>;
+    } else {
+      result = (await this.wallet.resolveAsLoss(
+        userId,
+        signal.id,
+        exitPrice,
+      )) as Record<string, unknown>;
+    }
+
+    const scoringPoints =
+      result &&
+      typeof result === 'object' &&
+      'scoring' in result &&
+      result.scoring &&
+      typeof result.scoring === 'object' &&
+      'totalPoints' in result.scoring
+        ? Number((result.scoring as { totalPoints: number }).totalPoints)
+        : undefined;
+
+    return {
+      status: 'closed',
+      signalId: signal.signalId,
+      exitPrice,
+      outcome: manualOutcome,
+      fullTp: hitFullTp,
+      tp1Price: oneToOnePrice,
+      pointsAwarded: scoringPoints,
+      message:
+        manualOutcome === 'tp'
+          ? hitFullTp
+            ? 'Trade closed at full TP — counted as a win'
+            : 'Trade closed after TP1 (1:1) — counted as a win'
+          : manualOutcome === 'even'
+            ? 'Trade closed before TP1 — recorded as even (no win/loss points)'
+            : 'Trade closed in loss — counted as a loss',
+    };
+  }
+
+  async claimSetup(userId: string, signalId: string, dto: ClaimSetupDto) {
+    await this.compliance.requireActiveTrader(userId);
+
+    const resolution = await this.getSetupResolution(userId, signalId);
+    if (!resolution.claimable) {
+      throw new BadRequestException(
+        resolution.reason ||
+          'This setup cannot be claimed yet — market price has not reached TP or SL, and Signal Hub has not marked it complete.',
+      );
+    }
+
+    const outcome = dto.outcome;
+    const isRr1Claim = outcome === 'tp' && dto.tpClaimType === 'rr_1_1';
+
+    if (isRr1Claim) {
+      if (!('canClaimTp1R1' in resolution) || !resolution.canClaimTp1R1) {
+        throw new BadRequestException(
+          ('tp1ClaimBlockedReason' in resolution &&
+            resolution.tp1ClaimBlockedReason) ||
+            '1:1 RR claim is not available yet — TP1 or partial close with breakeven is required.',
+        );
+      }
+    } else if (outcome === 'tp' && !resolution.canClaimTp) {
+      throw new BadRequestException(
+        'Take profit has not been reached according to current market data or execution status.',
+      );
+    }
+    if (outcome === 'sl' && !resolution.canClaimSl) {
+      throw new BadRequestException(
+        'Stop loss has not been reached according to current market data or execution status.',
+      );
+    }
+
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId, status: 'OPEN' },
+      include: { trade: true },
+    });
+    if (!signal || !signal.trade) {
+      throw new NotFoundException('Open setup not found');
+    }
+
+    const exitPrice =
+      isRr1Claim && 'oneToOnePrice' in resolution && resolution.oneToOnePrice != null
+        ? Number(resolution.oneToOnePrice)
+        : resolution.currentPrice ??
+          (outcome === 'tp'
+            ? Number(signal.takeProfit)
+            : Number(signal.stopLoss));
+
+    if (outcome === 'tp') {
+      if (!dto.beforeScreenshotUrl?.trim() || !dto.afterScreenshotUrl?.trim()) {
+        throw new BadRequestException(
+          'Before and after chart screenshots are required to claim take profit',
+        );
+      }
+
+      const user = await this.prisma.user.findUnique({ where: { id: userId } });
+      const usesMetaApi =
+        this.metaApi.isConfigured &&
+        user &&
+        Boolean(
+          this.metaApi.resolveAccountId(
+            signal.metaApiAccountId ?? user.metaApiAccountId,
+          ),
+        );
+
+      const claimResult = await this.tpClaims.createPendingClaim(
+        userId,
+        signal,
+        exitPrice,
+        dto.beforeScreenshotUrl.trim(),
+        dto.afterScreenshotUrl.trim(),
+        isRr1Claim ? 'RR_1_TO_1' : 'FULL_TP',
+      );
+
+      let metaApiNote: string | undefined;
+      if (usesMetaApi && user && !isRr1Claim) {
+        try {
+          const closeResult = await this.metaApi.closeSignalTradeIfOpen({
+            accountId: this.metaApi.resolveAccountId(
+              signal.metaApiAccountId ?? user.metaApiAccountId,
+            )!,
+            displayName: user.displayName,
+            userId,
+            signalId: signal.signalId,
+            symbol: signal.symbol,
+            metaApiPositionId: signal.metaApiPositionId,
+            metaApiOrderId: signal.metaApiOrderId,
+            tradeActivated: Boolean(signal.trade?.activatedAt),
+          });
+          if (closeResult.action === 'closed') {
+            metaApiNote = 'Broker position closed at take profit';
+          }
+        } catch (err) {
+          this.logger.warn(
+            `Broker close skipped for TP claim ${signal.signalId}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+
+      return {
+        ...claimResult,
+        ...(metaApiNote ? { metaApiNote } : {}),
+      };
+    }
+
+    await this.priceMonitor.ensureTradeActivated(
+      signal.trade,
+      signal,
+      exitPrice,
+    );
+
+    return this.applySetupOutcome(signal, outcome, exitPrice, 'claim');
+  }
+
+  async archiveSetup(userId: string, signalId: string) {
+    await this.compliance.requireActiveTrader(userId);
+
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId, status: 'OPEN' },
+      include: { trade: true },
+    });
+    if (!signal) {
+      throw new NotFoundException('Open setup not found');
+    }
+
+    await this.applyArchiveToOpenSignal(signal);
+
+    this.logger.log(`Setup archived: ${signal.signalId} by ${userId}`);
+
+    return {
+      status: 'archived',
+      signalId: signal.signalId,
+    };
+  }
+
+  async archiveAllSetups(userId: string) {
+    await this.compliance.requireActiveTrader(userId);
+
+    const open = await this.prisma.signal.findMany({
+      where: { userId, status: 'OPEN' },
+      include: { trade: true },
+    });
+
+    if (open.length === 0) {
+      return { archivedCount: 0, signalIds: [] as string[] };
+    }
+
+    for (const signal of open) {
+      await this.applyArchiveToOpenSignal(signal);
+    }
+
+    this.logger.log(`Archived ${open.length} setup(s) for ${userId}`);
+
+    return {
+      archivedCount: open.length,
+      signalIds: open.map((s) => s.signalId),
+    };
+  }
+
+  async listArchivedSetups(userId: string, limit = 50) {
+    await this.compliance.requireActiveTrader(userId);
+    const take = Math.min(Math.max(limit, 1), 100);
+
+    const items = await this.prisma.signal.findMany({
+      where: {
+        userId,
+        status: { in: ['ARCHIVED', 'CANCELLED'] },
+      },
+      orderBy: { resolvedAt: 'desc' },
+      take,
+      select: {
+        id: true,
+        signalId: true,
+        symbol: true,
+        direction: true,
+        status: true,
+        entryMin: true,
+        entryMax: true,
+        stopLoss: true,
+        takeProfit: true,
+        submittedAt: true,
+        resolvedAt: true,
+      },
+    });
+
+    return {
+      items: items.map((row) => ({
+        ...row,
+        entryMin: Number(row.entryMin),
+        entryMax: Number(row.entryMax),
+        stopLoss: Number(row.stopLoss),
+        takeProfit: Number(row.takeProfit),
+      })),
+      count: items.length,
+    };
+  }
+
+  private async applyArchiveToOpenSignal(
+    signal: Signal & { trade: Trade | null },
+    resolvedAt = new Date(),
+  ) {
+    await this.prisma.$transaction([
+      this.prisma.signal.update({
+        where: { id: signal.id },
+        data: {
+          status: 'ARCHIVED',
+          resolvedAt,
+        },
+      }),
+      ...(signal.trade
+        ? [
+            this.prisma.trade.update({
+              where: { id: signal.trade.id },
+              data: { closedAt: resolvedAt },
+            }),
+          ]
+        : []),
+    ]);
+  }
+
+  private async invalidateSetupOnHub(
+    signal: {
+      signalId: string;
+      hubRecordId: string | null;
+      hubSenderName: string | null;
+    },
+    user: { id: string; displayName: string },
+    reason: string,
+  ) {
+    if (!this.signalHub.isConfigured) return;
+
+    const sendername =
+      signal.hubSenderName ||
+      this.signalHub.toSenderName(user.displayName, user.id);
+    const alternates = [
+      this.signalHub.toSenderName(user.displayName, user.id),
+      `trader_${user.id.slice(0, 8)}`,
+    ].filter((name) => name !== sendername);
+
+    const result = await this.signalHub.invalidateByExternalId(
+      signal.signalId,
+      sendername,
+      reason,
+      alternates,
+    );
+    if (!result.data && result.notOnHub && signal.hubRecordId) {
+      await this.signalHub.invalidateByHubId(
+        signal.hubRecordId,
+        sendername,
+        reason,
+      );
+    }
+  }
+
+  private async tryCancelMetaApiPendingForSetup(
+    signal: {
+      id: string;
+      signalId: string;
+      symbol: string;
+      metaApiAccountId: string | null;
+      metaApiOrderId: string | null;
+      metaApiPositionId: string | null;
+      trade: { activatedAt: Date | null } | null;
+    },
+    user: { displayName: string; metaApiAccountId: string | null; id: string },
+  ) {
+    if (!this.metaApi.isConfigured) return;
+
+    const accountId = this.metaApi.resolveAccountId(
+      signal.metaApiAccountId ?? user.metaApiAccountId,
+    );
+    if (!accountId) return;
+
+    try {
+      const account = await this.metaApi.ensureAccountReady(accountId);
+      const { clientId } = this.metaApi.buildIdentifiersForUser(
+        user.displayName,
+        user.id,
+        signal.signalId,
+        signal.symbol,
+      );
+      const live = await this.metaApi.findLiveTradeForSignal(account, {
+        positionId: signal.metaApiPositionId,
+        orderId: signal.metaApiOrderId,
+        clientId,
+        displayName: user.displayName,
+        userId: user.id,
+        symbol: signal.symbol,
+        activated: Boolean(signal.trade?.activatedAt),
+      });
+
+      if (live.status === 'pending' && live.orderId) {
+        await this.metaApi.cancelPendingOrder(account, live.orderId);
+        await this.prisma.signal.update({
+          where: { id: signal.id },
+          data: {
+            metaApiAccountId: null,
+            metaApiOrderId: null,
+            metaApiPositionId: null,
+            metaApiExecutedAt: null,
+          },
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `MetaAPI pending cancel skipped for ${signal.signalId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  private async systemExpireOpenSetup(
+    signal: Signal & {
+      trade: Trade | null;
+      user: { id: string; displayName: string; metaApiAccountId: string | null };
+    },
+    user: { id: string; displayName: string; metaApiAccountId: string | null },
+  ): Promise<boolean> {
+    const reason = `Auto-expired — setup older than ${SETUP_MAX_AGE_MS / 3600000} hours`;
+
+    await this.tryCancelMetaApiPendingForSetup(signal, user);
+    await this.invalidateSetupOnHub(signal, user, reason);
+
+    const now = new Date();
+    await this.prisma.$transaction([
+      this.prisma.signal.update({
+        where: { id: signal.id },
+        data: {
+          status: 'ARCHIVED',
+          resolvedAt: now,
+        },
+      }),
+      ...(signal.trade
+        ? [
+            this.prisma.trade.update({
+              where: { id: signal.trade.id },
+              data: { closedAt: now },
+            }),
+          ]
+        : []),
+    ]);
+
+    await this.platformNotifications.create({
+      userId: user.id,
+      type: 'SETUP_EXPIRED',
+      title: `${signal.symbol} setup expired`,
+      body: `Your setup was automatically closed after ${SETUP_MAX_AGE_MS / 3600000} hours. Submit a fresh setup if you still want to trade it.`,
+      linkUrl: '/submit',
+      signalId: signal.signalId,
+    });
+
+    this.logger.log(`Setup auto-expired: ${signal.signalId} (user ${user.id})`);
+    return true;
+  }
+
+  /**
+   * User-initiated delete of a pending limit they placed.
+   * Cancels the broker pending order (MetaAPI) and any Hub pending record,
+   * then stops the platform from auto-re-placing it. The setup stays OPEN
+   * so the trader keeps the record, but no order will be placed again.
+   */
+  async deleteSetupLimit(userId: string, signalId: string) {
+    await this.compliance.requireActiveTrader(userId);
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId, status: 'OPEN' },
+      include: { trade: true },
+    });
+    if (!signal) throw new NotFoundException('Open setup not found');
+
+    let cancelledMetaApi = false;
+    let hubWarning: string | undefined;
+
+    // Cancel MetaAPI pending order if one exists — refuse if a live position is open.
+    if (this.metaApi.isConfigured) {
+      const accountId = this.metaApi.resolveAccountId(
+        signal.metaApiAccountId ?? user.metaApiAccountId,
+      );
+      if (accountId && (signal.metaApiOrderId || signal.metaApiPositionId)) {
+        const account = await this.metaApi.ensureAccountReady(accountId);
+        const { clientId } = this.metaApi.buildIdentifiersForUser(
+          user.displayName,
+          userId,
+          signal.signalId,
+          signal.symbol,
+        );
+        const live = await this.metaApi.findLiveTradeForSignal(account, {
+          positionId: signal.metaApiPositionId,
+          orderId: signal.metaApiOrderId,
+          clientId,
+          displayName: user.displayName,
+          userId,
+          symbol: signal.symbol,
+          activated: Boolean(signal.trade?.activatedAt),
+        });
+
+        if (live.status === 'open') {
+          throw new BadRequestException(
+            'This setup already has a live trade — use Close trade instead of deleting the limit.',
+          );
+        }
+        if (live.status === 'pending' && live.orderId) {
+          await this.metaApi.cancelPendingOrder(account, live.orderId);
+          cancelledMetaApi = true;
+        }
+      }
+    }
+
+    // Cancel any Hub pending record so it cannot fill later.
+    if (this.signalHub.isConfigured && signal.hubRecordId) {
+      const currentSender = this.signalHub.toSenderName(
+        user.displayName,
+        userId,
+      );
+      const sendername = signal.hubSenderName || currentSender;
+      const alternates = [currentSender, `trader_${userId.slice(0, 8)}`].filter(
+        (name) => name !== sendername,
+      );
+      const result = await this.signalHub.invalidateByExternalId(
+        signal.signalId,
+        sendername,
+        'Limit deleted by trader',
+        alternates,
+      );
+      if (!result.data && result.notOnHub && signal.hubRecordId) {
+        const byId = await this.signalHub.invalidateByHubId(
+          signal.hubRecordId,
+          sendername,
+          'Limit deleted by trader',
+        );
+        if (byId.error && !byId.error.includes('404')) hubWarning = byId.error;
+      } else if (result.error) {
+        hubWarning = result.error;
+      }
+    }
+
+    await this.prisma.signal.update({
+      where: { id: signal.id },
+      data: {
+        limitAutoPlaceDisabled: true,
+        metaApiAccountId: null,
+        metaApiOrderId: null,
+        metaApiPositionId: null,
+        metaApiExecutedAt: null,
+        hubRecordId: null,
+        hubOrderNotifiedAt: null,
+      },
+    });
+
+    this.logger.log(
+      `Limit deleted for ${signal.signalId} by ${userId} (metaApi cancelled: ${cancelledMetaApi})`,
+    );
+
+    return {
+      status: 'limit_deleted',
+      signalId: signal.signalId,
+      cancelledMetaApi,
+      hubWarning,
+      message:
+        'Limit deleted — the pending order was cancelled and will not be placed again. The setup stays in your open list.',
+    };
+  }
+
+  async invalidateSetup(
+    userId: string,
+    signalId: string,
+    reason?: string,
+  ) {
+    await this.compliance.requireActiveTrader(userId);
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId, status: 'OPEN' },
+      include: { trade: true },
+    });
+    if (!signal) {
+      throw new NotFoundException('Open setup not found');
+    }
+
+    await this.assertSetupCanInvalidate(userId, signal, user);
+
+    let hub: Record<string, unknown> | null = null;
+    let hubWarning: string | undefined;
+    let hubNotFound = false;
+
+    if (this.signalHub.isConfigured) {
+      const currentSender = this.signalHub.toSenderName(
+        user.displayName,
+        userId,
+      );
+      const sendername = signal.hubSenderName || currentSender;
+      const alternates = [
+        currentSender,
+        `trader_${userId.slice(0, 8)}`,
+      ].filter((name) => name !== sendername);
+
+      const result = await this.signalHub.invalidateByExternalId(
+        signal.signalId,
+        sendername,
+        reason,
+        alternates,
+      );
+      if (result.data) {
+        hub = result.data as Record<string, unknown>;
+      } else if (result.notOnHub && signal.hubRecordId) {
+        const byId = await this.signalHub.invalidateByHubId(
+          signal.hubRecordId,
+          sendername,
+          reason,
+        );
+        if (byId.data) {
+          hub = byId.data as Record<string, unknown>;
+        } else if (byId.error && !byId.error.includes('404')) {
+          hubWarning = byId.error;
+        } else {
+          hubNotFound = true;
+        }
+      } else if (result.notOnHub) {
+        hubNotFound = true;
+      } else if (result.error) {
+        hubWarning = result.error;
+      }
+    }
+
+    const now = new Date();
+    const note =
+      reason?.trim() ||
+      'Setup invalidated by trader — pending Hub execution cancelled';
+
+    await this.prisma.$transaction([
+      this.prisma.signal.update({
+        where: { id: signal.id },
+        data: {
+          status: 'ARCHIVED',
+          resolvedAt: now,
+        },
+      }),
+      ...(signal.trade
+        ? [
+            this.prisma.trade.update({
+              where: { id: signal.trade.id },
+              data: { closedAt: now },
+            }),
+          ]
+        : []),
+      this.prisma.tpClaim.updateMany({
+        where: { signalId: signal.id, status: 'PENDING_REVIEW' },
+        data: {
+          status: 'REJECTED',
+          adminNote: note,
+          reviewedAt: now,
+        },
+      }),
+    ]);
+
+    this.logger.log(
+      `Setup invalidated: ${signal.signalId} by ${userId}${hubWarning ? ` (hub: ${hubWarning})` : ''}`,
+    );
+
+    return {
+      status: 'archived',
+      signalId: signal.signalId,
+      hub,
+      hubNotFound,
+      hubWarning,
+    };
+  }
+
+  async handleTradeLifecycleWebhook(dto: TradeLifecycleWebhookDto) {
+    const items = this.extractLifecycleItems(dto);
+    const results: Record<string, unknown>[] = [];
+
+    for (const item of items) {
+      results.push(await this.processTradeLifecycleItem(item));
+    }
+
+    if (results.length === 1) {
+      return results[0];
+    }
+
+    return {
+      processed: results.length,
+      results,
+    };
+  }
+
+  private extractLifecycleItems(
+    dto: TradeLifecycleWebhookDto,
+  ): TradeLifecycleItemDto[] {
+    if (dto.trades?.length) {
+      return dto.trades;
+    }
+
+    if (dto.event) {
+      const sender = dto.sender?.trim() || dto.sendername?.trim();
+      if (!sender) {
+        throw new BadRequestException(
+          'sender (or sendername) is required for each trade event',
+        );
+      }
+
+      return [
+        {
+          event: dto.event,
+          sender,
+          sendername: dto.sendername,
+          signalId: dto.signalId,
+          external_id: dto.external_id,
+          symbol: dto.symbol,
+          direction: dto.direction,
+          entry: dto.entry,
+          sl: dto.sl,
+          tp: dto.tp,
+          exit_price: dto.exit_price,
+          outcome: dto.outcome,
+          ticket: dto.ticket,
+          opened_at: dto.opened_at,
+          closed_at: dto.closed_at,
+        },
+      ];
+    }
+
+    throw new BadRequestException(
+      'Send a single trade event (event, sender, signalId) or { "trades": [ ... ] }',
+    );
+  }
+
+  private async processTradeLifecycleItem(item: TradeLifecycleItemDto) {
+    const sender = item.sender?.trim() || item.sendername?.trim();
+    if (!sender) {
+      throw new BadRequestException('sender is required on each trade event');
+    }
+
+    const signal = await this.resolveSignalForLifecycle(item, sender);
+    if (!signal) {
+      throw new NotFoundException(
+        `No matching open setup for sender "${sender}"${
+          item.signalId || item.external_id
+            ? ` / signal ${item.signalId || item.external_id}`
+            : ''
+        }`,
+      );
+    }
+
+    this.assertLifecycleSender(signal.user.displayName, signal.userId, sender);
+
+    if (!signal.trade) {
+      throw new BadRequestException('Setup has no associated trade record');
+    }
+
+    const event = item.event === 'open' ? 'opened' : item.event;
+
+    if (event === 'opened') {
+      return this.handleTradeOpenedEvent(signal, item, sender);
+    }
+
+    if (event === 'partial' || event === 'partial_close') {
+      return this.handleTradePartialEvent(signal, item, sender);
+    }
+
+    return this.handleTradeClosedEvent(signal, item, sender);
+  }
+
+  private async resolveSignalForLifecycle(
+    item: TradeLifecycleItemDto,
+    sender: string,
+  ) {
+    const externalId = item.signalId?.trim() || item.external_id?.trim();
+
+    if (externalId) {
+      const signal = await this.prisma.signal.findUnique({
+        where: { signalId: externalId },
+        include: { trade: true, user: true },
+      });
+      return signal;
+    }
+
+    const symbol = item.symbol
+      ? normalizeChartSymbol(item.symbol)
+      : undefined;
+
+    const openSignals = await this.prisma.signal.findMany({
+      where: {
+        status: 'OPEN',
+        ...(symbol ? { symbol } : {}),
+      },
+      include: { trade: true, user: true },
+      orderBy: { submittedAt: 'desc' },
+      take: 100,
+    });
+
+    const senderLower = sender.toLowerCase();
+    return (
+      openSignals.find(
+        (s) =>
+          this.signalHub
+            .toSenderName(s.user.displayName, s.user.id)
+            .toLowerCase() === senderLower,
+      ) ?? null
+    );
+  }
+
+  private assertLifecycleSender(
+    displayName: string,
+    userId: string,
+    sender: string,
+  ) {
+    const expected = this.signalHub.toSenderName(displayName, userId);
+    if (expected.toLowerCase() !== sender.trim().toLowerCase()) {
+      throw new BadRequestException(
+        `sender "${sender}" does not match expected "${expected}" for this setup`,
+      );
+    }
+  }
+
+  private async handleTradeOpenedEvent(
+    signal: Signal & { trade: Trade | null; user: User },
+    item: TradeLifecycleItemDto,
+    sender: string,
+  ) {
+    if (signal.status !== 'OPEN') {
+      return {
+        status: 'ignored',
+        event: 'opened',
+        reason: 'already_resolved',
+        signalId: signal.signalId,
+        sender,
+        tradeState: signal.status.toLowerCase(),
+      };
+    }
+
+    const entryPrice = item.entry;
+
+    const tradeUpdate: {
+      entryPrice?: number;
+      stopLoss?: number;
+      takeProfit?: number;
+      activatedAt?: Date;
+    } = {};
+
+    if (item.entry != null) tradeUpdate.entryPrice = item.entry;
+    if (item.sl != null) tradeUpdate.stopLoss = item.sl;
+    if (item.tp != null) tradeUpdate.takeProfit = item.tp;
+
+    if (!signal.trade!.activatedAt) {
+      tradeUpdate.activatedAt = item.opened_at
+        ? new Date(item.opened_at)
+        : new Date();
+    }
+
+    if (Object.keys(tradeUpdate).length > 0) {
+      await this.prisma.trade.update({
+        where: { id: signal.trade!.id },
+        data: tradeUpdate,
+      });
+    }
+
+    const trade = await this.prisma.trade.findUniqueOrThrow({
+      where: { id: signal.trade!.id },
+    });
+
+    await this.priceMonitor.ensureTradeActivated(
+      trade,
+      {
+        entryMin: signal.entryMin,
+        entryMax: signal.entryMax,
+      },
+      entryPrice,
+    );
+
+    this.logger.log(
+      `Trade opened via webhook: ${signal.signalId} sender=${sender} entry=${item.entry ?? 'default'}`,
+    );
+
+    return {
+      status: 'opened',
+      event: 'opened',
+      signalId: signal.signalId,
+      sender,
+      symbol: signal.symbol,
+      direction: signal.direction,
+      entry: item.entry ?? null,
+      sl: item.sl ?? Number(signal.stopLoss),
+      tp: item.tp ?? Number(signal.takeProfit),
+      ticket: item.ticket ?? null,
+      tradeState: 'in_trade',
+    };
+  }
+
+  private async handleTradePartialEvent(
+    signal: Signal & { trade: Trade | null; user: User },
+    item: TradeLifecycleItemDto,
+    sender: string,
+  ) {
+    if (signal.trade) {
+      await this.prisma.trade.update({
+        where: { id: signal.trade.id },
+        data: {
+          partialClosedAt: new Date(),
+          ...(item.volume != null
+            ? { partialCloseVolume: item.volume }
+            : {}),
+          ...(item.profit != null
+            ? { partialCloseProfit: item.profit }
+            : {}),
+          activatedAt: signal.trade.activatedAt ?? new Date(),
+        },
+      });
+    }
+
+    this.notifications.tradePartialClose(signal.userId, {
+      symbol: signal.symbol,
+      signalId: signal.signalId,
+      volume: item.volume,
+      profit: item.profit,
+      exitPrice: item.exit_price,
+      message: item.message,
+    });
+
+    this.logger.log(
+      `Partial close via webhook: ${signal.signalId} sender=${sender}`,
+    );
+
+    return {
+      status: 'partial',
+      event: 'partial_close',
+      signalId: signal.signalId,
+      sender,
+      symbol: signal.symbol,
+      volume: item.volume ?? null,
+      profit: item.profit ?? null,
+      exit_price: item.exit_price ?? null,
+      tradeState: 'partial',
+    };
+  }
+
+  private async handleTradeClosedEvent(
+    signal: Signal & { trade: Trade | null },
+    item: TradeLifecycleItemDto,
+    sender: string,
+  ) {
+    if (signal.status !== 'OPEN') {
+      return {
+        status: 'ignored',
+        event: 'closed',
+        reason: 'already_resolved',
+        signalId: signal.signalId,
+        sender,
+        tradeState: signal.status.toLowerCase(),
+        currentStatus: signal.status,
+      };
+    }
+
+    const tp = Number(signal.takeProfit);
+    const sl = Number(signal.stopLoss);
+    const exitPrice =
+      item.exit_price ??
+      (item.outcome === 'tp' ? tp : item.outcome === 'sl' ? sl : undefined);
+
+    if (exitPrice == null) {
+      throw new BadRequestException(
+        'closed events require exit_price and/or outcome (tp|sl)',
+      );
+    }
+
+    const outcome =
+      item.outcome ??
+      this.inferCloseOutcome(
+        signal.direction as 'BUY' | 'SELL',
+        exitPrice,
+        tp,
+        sl,
+      );
+
+    await this.prisma.tpClaim.updateMany({
+      where: { signalId: signal.id, status: 'PENDING_REVIEW' },
+      data: {
+        status: 'REJECTED',
+        adminNote: 'Setup resolved automatically via trade lifecycle webhook',
+        reviewedAt: new Date(),
+      },
+    });
+
+    const trade = await this.prisma.trade.findUniqueOrThrow({
+      where: { id: signal.trade!.id },
+    });
+
+    await this.priceMonitor.ensureTradeActivated(
+      trade,
+      {
+        entryMin: signal.entryMin,
+        entryMax: signal.entryMax,
+      },
+      item.entry ?? exitPrice,
+    );
+
+    const result = await this.applySetupOutcome(
+      signal,
+      outcome,
+      exitPrice,
+      'webhook',
+    );
+
+    this.logger.log(
+      `Trade closed via webhook: ${signal.signalId} sender=${sender} outcome=${outcome}`,
+    );
+
+    return {
+      ...result,
+      event: 'closed',
+      sender,
+      symbol: item.symbol,
+      entry: item.entry ?? null,
+      sl: item.sl ?? sl,
+      tp: item.tp ?? tp,
+      exit_price: exitPrice,
+      ticket: item.ticket ?? null,
+      tradeState: outcome === 'tp' ? 'won' : 'lost',
+      closed_at: item.closed_at ?? new Date().toISOString(),
+    };
+  }
+
+  private inferCloseOutcome(
+    direction: 'BUY' | 'SELL',
+    exitPrice: number,
+    tp: number,
+    sl: number,
+  ): SetupOutcome {
+    const tpDist = Math.abs(exitPrice - tp);
+    const slDist = Math.abs(exitPrice - sl);
+    if (tpDist === slDist) {
+      return direction === 'BUY'
+        ? exitPrice >= tp
+          ? 'tp'
+          : 'sl'
+        : exitPrice <= tp
+          ? 'tp'
+          : 'sl';
+    }
+    return tpDist < slDist ? 'tp' : 'sl';
+  }
+
+  async handleTradeOutcomeWebhook(
+    dto: TradeOutcomeWebhookDto,
+    hubPayload?: Record<string, unknown>,
+  ) {
+    const externalId =
+      dto.signalId ||
+      dto.external_id ||
+      (typeof hubPayload?.external_id === 'string'
+        ? hubPayload.external_id
+        : undefined);
+
+    if (!externalId) {
+      throw new BadRequestException(
+        'signalId or external_id is required',
+      );
+    }
+
+    const signal = await this.prisma.signal.findUnique({
+      where: { signalId: externalId },
+      include: { trade: true },
+    });
+
+    if (!signal) {
+      throw new NotFoundException(`Setup not found: ${externalId}`);
+    }
+    if (signal.status !== 'OPEN') {
+      return {
+        status: 'ignored',
+        reason: 'already_resolved',
+        signalId: signal.signalId,
+        currentStatus: signal.status,
+      };
+    }
+    if (!signal.trade) {
+      throw new BadRequestException('Setup has no associated trade record');
+    }
+
+    const outcome =
+      dto.outcome ??
+      this.outcomeFromHubPayload(hubPayload ?? (dto as Record<string, unknown>));
+
+    if (!outcome) {
+      throw new BadRequestException(
+        'Could not determine outcome — send outcome ("tp"|"sl") or Hub status (done/failed)',
+      );
+    }
+
+    const exitPrice =
+      dto.exit_price ??
+      this.exitPriceFromPayload(hubPayload, signal, outcome) ??
+      (outcome === 'tp'
+        ? Number(signal.takeProfit)
+        : Number(signal.stopLoss));
+
+    await this.priceMonitor.ensureTradeActivated(
+      signal.trade,
+      signal,
+      exitPrice,
+    );
+
+    return this.applySetupOutcome(signal, outcome, exitPrice, 'webhook');
+  }
+
+  async handleHubCallback(payload: Record<string, unknown>) {
+    this.logger.log(
+      `Signal Hub callback: ${JSON.stringify(payload).slice(0, 500)}`,
+    );
+
+    try {
+      return await this.handleTradeOutcomeWebhook(
+        {
+          external_id:
+            typeof payload.external_id === 'string'
+              ? payload.external_id
+              : undefined,
+          status:
+            typeof payload.status === 'string' ? payload.status : undefined,
+          exit_price: this.readNumeric(payload, 'exit_price'),
+        },
+        payload,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Hub callback failed: ${err instanceof Error ? err.message : err}`,
+      );
+      throw err;
+    }
+  }
+
+  verifyWebhookSecret(provided: string | undefined) {
+    const expected =
+      process.env.TRADE_OUTCOME_WEBHOOK_SECRET?.trim() ||
+      process.env.SIGNAL_WEBHOOK_SECRET?.trim();
+
+    if (!expected) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new ServiceUnavailableException(
+          'TRADE_OUTCOME_WEBHOOK_SECRET is not configured on the server',
+        );
+      }
+      return;
+    }
+
+    if (!provided || provided !== expected) {
+      throw new UnauthorizedException('Invalid webhook secret');
+    }
+  }
+
+  private async applySetupOutcome(
+    signal: {
+      id: string;
+      signalId: string;
+      userId: string;
+      takeProfit: unknown;
+      stopLoss: unknown;
+      trade: { id: string } | null;
+    },
+    outcome: SetupOutcome,
+    exitPrice: number,
+    source: 'claim' | 'webhook',
+  ) {
+    if (!signal.trade) {
+      throw new BadRequestException('Setup has no associated trade record');
+    }
+
+    const result =
+      outcome === 'tp'
+        ? await this.wallet.creditTpReward(signal.userId, signal.id, exitPrice)
+        : await this.wallet.resolveAsLoss(signal.userId, signal.id, exitPrice);
+
+    if (!result) {
+      throw new BadRequestException(
+        'Setup could not be resolved — it may already be closed.',
+      );
+    }
+
+    const signalRow = await this.prisma.signal.findUnique({
+      where: { id: signal.id },
+      select: { symbol: true, signalId: true },
+    });
+
+    if (signalRow) {
+      this.notifications.tradeOutcome(signal.userId, {
+        symbol: signalRow.symbol,
+        signalId: signalRow.signalId,
+        outcome,
+        exitPrice,
+        reward:
+          outcome === 'tp' && 'reward' in result ?
+            Number(result.reward)
+          : undefined,
+        pointsAwarded:
+          'scoring' in result ? result.scoring?.totalPoints : undefined,
+        source,
+      });
+    }
+
+    return {
+      status: source === 'claim' ? 'claimed' : 'resolved',
+      source,
+      outcome,
+      signalId: signal.signalId,
+      exitPrice,
+      reward: outcome === 'tp' && 'reward' in result ? result.reward : undefined,
+      pointsAwarded:
+        'scoring' in result ? result.scoring?.totalPoints : undefined,
+    };
+  }
+
+  private outcomeFromHubPayload(
+    payload: Record<string, unknown> | null | undefined,
+  ): SetupOutcome | null {
+    if (!payload) return null;
+
+    const explicit = payload.outcome;
+    if (explicit === 'tp' || explicit === 'sl') return explicit;
+
+    const result =
+      payload.result && typeof payload.result === 'object'
+        ? (payload.result as Record<string, unknown>)
+        : null;
+    const profit = result?.profit;
+    if (typeof profit === 'number') {
+      return profit >= 0 ? 'tp' : 'sl';
+    }
+
+    const progress =
+      payload.progress && typeof payload.progress === 'object'
+        ? (payload.progress as Record<string, unknown>)
+        : null;
+    const message = String(progress?.message ?? '').toLowerCase();
+    if (/take profit|\btp\b hit|tp reached|closed in profit/.test(message)) {
+      return 'tp';
+    }
+    if (
+      /stop loss|\bsl\b hit|sl reached|stopped out|closed in loss/.test(
+        message,
+      )
+    ) {
+      return 'sl';
+    }
+
+    const status = String(payload.status ?? '').toLowerCase();
+    if (status === 'failed') return 'sl';
+    if (status === 'done') {
+      const stage = String(progress?.stage ?? '').toLowerCase();
+      if (/fail|sl|stop/.test(stage)) return 'sl';
+      return 'tp';
+    }
+
+    return null;
+  }
+
+  private exitPriceFromPayload(
+    payload: Record<string, unknown> | null | undefined,
+    signal: { takeProfit: unknown; stopLoss: unknown },
+    outcome: SetupOutcome,
+  ): number | undefined {
+    if (!payload) return undefined;
+
+    const fromRoot = this.readNumeric(payload, 'exit_price');
+    if (fromRoot !== undefined) return fromRoot;
+
+    const result =
+      payload.result && typeof payload.result === 'object'
+        ? (payload.result as Record<string, unknown>)
+        : null;
+    const closePrice = this.readNumeric(result ?? {}, 'close_price');
+    if (closePrice !== undefined) return closePrice;
+
+    const price = this.readNumeric(result ?? {}, 'price');
+    if (price !== undefined) return price;
+
+    return outcome === 'tp'
+      ? Number(signal.takeProfit)
+      : Number(signal.stopLoss);
+  }
+
+  private readNumeric(
+    obj: Record<string, unknown> | null | undefined,
+    key: string,
+  ): number | undefined {
+    if (!obj) return undefined;
+    const value = obj[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim()) {
+      const n = Number(value);
+      if (Number.isFinite(n)) return n;
+    }
+    return undefined;
+  }
+
+  private async inferHubOutcome(
+    sendername: string,
+    hub: {
+      id?: string;
+      status?: string;
+      progress?: { executed?: boolean } | null;
+      result?: Record<string, unknown> | null;
+    } | null,
+  ): Promise<SetupOutcome | null> {
+    if (!hub) return null;
+
+    const profit = hub.result?.profit;
+    if (typeof profit === 'number') {
+      return profit >= 0 ? 'tp' : 'sl';
+    }
+
+    if (hub.id) {
+      const logs = await this.signalHub.getLogs(sendername, {
+        signal_id: hub.id,
+        limit: 30,
+      });
+      for (const log of logs?.items ?? []) {
+        const text = `${log.event} ${log.message}`.toLowerCase();
+        if (/take profit|\btp\b hit|tp reached|closed in profit/.test(text)) {
+          return 'tp';
+        }
+        if (
+          /stop loss|\bsl\b hit|sl reached|stopped out|closed in loss/.test(
+            text,
+          )
+        ) {
+          return 'sl';
+        }
+      }
+    }
+
+    if (hub.progress?.executed && hub.status === 'done') {
+      return 'tp';
+    }
+
+    return null;
+  }
+
+  private async hubContext(userId: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new BadRequestException('User not found');
+    if (!this.signalHub.isConfigured) {
+      throw new ServiceUnavailableException('Signal Hub is not configured');
+    }
+    return {
+      user,
+      sendername: this.signalHub.toSenderName(user.displayName, userId),
+    };
+  }
+
+  async getExecutionStatus(userId: string, signalId: string) {
+    const { sendername } = await this.hubContext(userId);
+    const signal = await this.prisma.signal.findFirst({
+      where: { signalId, userId },
+    });
+    if (!signal) throw new BadRequestException('Signal not found');
+
+    const hub = await this.signalHub.getByExternalId(signal.signalId, sendername);
+    if (!hub) {
+      throw new ServiceUnavailableException('Could not fetch execution status');
+    }
+    return hub;
+  }
+
+  async getExecutionLogs(
+    userId: string,
+    filters?: { signal_id?: string; limit?: number; offset?: number },
+  ) {
+    const { sendername } = await this.hubContext(userId);
+    const logs = await this.signalHub.getLogs(sendername, filters);
+    if (!logs) {
+      throw new ServiceUnavailableException('Could not fetch execution logs');
+    }
+    return logs;
+  }
+
+  async getOpenPositions(userId: string) {
+    const { sendername } = await this.hubContext(userId);
+    const positions = await this.signalHub.getPositions(sendername);
+    if (!positions) {
+      throw new ServiceUnavailableException('Could not fetch open positions');
+    }
+    return positions;
+  }
+
+  async closePosition(userId: string, ticket: number) {
+    const { sendername } = await this.hubContext(userId);
+    const result = await this.signalHub.closePosition(ticket, sendername);
+    if (!result) {
+      throw new ServiceUnavailableException('Could not close position');
+    }
+    return result;
+  }
+
+  async closeAllPositions(userId: string) {
+    const { sendername } = await this.hubContext(userId);
+    const result = await this.signalHub.closeAllPositions(sendername);
+    if (!result) {
+      throw new ServiceUnavailableException('Could not close positions');
+    }
+    return result;
+  }
+
+  async listHubSignals(
+    userId: string,
+    filters?: {
+      status?: string;
+      external_id?: string;
+      limit?: number;
+      offset?: number;
+      since?: string;
+    },
+  ) {
+    const { sendername } = await this.hubContext(userId);
+    const list = await this.signalHub.listSignals(sendername, filters);
+    if (!list) {
+      throw new ServiceUnavailableException('Could not fetch hub signals');
+    }
+    return list;
+  }
+
+  getHubHealth() {
+    return this.signalHub.getHubHealth();
+  }
+
+  async getHubQuote(userId: string, symbol: string) {
+    await this.compliance.requireActiveTrader(userId);
+    if (!this.signalHub.isConfigured) {
+      throw new ServiceUnavailableException('Signal Hub is not configured');
+    }
+    const quote = await this.signalHub.getQuote(symbol);
+    if (!quote) {
+      throw new ServiceUnavailableException('Could not fetch live quote from Signal Hub');
+    }
+    return quote;
+  }
+
+  async getHubSignalById(userId: string, hubId: string) {
+    const { sendername } = await this.hubContext(userId);
+    const hub = await this.signalHub.getSignalByHubId(hubId, sendername);
+    if (!hub) {
+      throw new NotFoundException('Hub signal not found');
+    }
+    return hub;
+  }
+
+  async sendHubAction(userId: string, dto: HubActionDto) {
+    const { sendername } = await this.hubContext(userId);
+    const { hub, error } = await this.signalHub.sendHubAction(sendername, dto);
+    if (!hub) {
+      throw new ServiceUnavailableException(
+        error || 'Signal Hub did not accept the action',
+      );
+    }
+
+    if (dto.action === 'partial_close') {
+      this.notifications.tradePartialClose(userId, {
+        symbol: dto.symbol?.trim() || 'position',
+        signalId: dto.external_id || dto.ticket?.toString() || '—',
+        volume: dto.lot,
+        message:
+          dto.message ||
+          `Partial close on ${dto.symbol?.trim() || 'position'} via dashboard`,
+      });
+    }
+
+    return hub;
+  }
+
+  async getHubSenderReport(filters?: {
+    days?: number;
+    sort?: string;
+    min_closed_trades?: number;
+    limit?: number;
+  }) {
+    if (!this.signalHub.isConfigured) {
+      throw new ServiceUnavailableException('Signal Hub is not configured');
+    }
+    const report = await this.signalHub.getSenderReport(filters);
+    if (!report) {
+      throw new ServiceUnavailableException('Could not fetch sender report from Signal Hub');
+    }
+    return report;
+  }
+
+  async getHubSenderProfitability(filters?: {
+    days?: number;
+    min_closed_trades?: number;
+    limit?: number;
+  }) {
+    if (!this.signalHub.isConfigured) {
+      throw new ServiceUnavailableException('Signal Hub is not configured');
+    }
+    const report = await this.signalHub.getSenderProfitability(filters);
+    if (!report) {
+      throw new ServiceUnavailableException(
+        'Could not fetch sender profitability from Signal Hub',
+      );
+    }
+    return report;
+  }
+
+  /** MetaAPI account for chart quotes and OHLC (evaluation, linked sync, or platform). */
+  private async resolveMt5MarketDataAccount(userId: string) {
+    const { terminalAccountId, copyOwner } =
+      await this.resolveUserMt5TerminalContext(userId);
+
+    if (copyOwner) {
+      throw new BadRequestException(
+        'Chart market data is not available on the MT5 Copy account',
+      );
+    }
+
+    if (!this.metaApi.isConfigured || !terminalAccountId) {
+      throw new ServiceUnavailableException(
+        'MetaAPI is not configured or no trading account is linked',
+      );
+    }
+
+    return this.metaApi.getAccount(terminalAccountId);
+  }
+
+  /** Live quotes for symbols with open submitted setups (platform MT5). */
+  async getUserMt5Quotes(userId: string) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    let account;
+    try {
+      account = await this.resolveMt5MarketDataAccount(userId);
+    } catch {
+      return { items: [], refreshedAt: new Date().toISOString() };
+    }
+
+    const openSignals = await this.prisma.signal.findMany({
+      where: { userId, status: 'OPEN' },
+      orderBy: { submittedAt: 'desc' },
+      select: {
+        signalId: true,
+        symbol: true,
+        direction: true,
+        entryMin: true,
+        entryMax: true,
+        submittedAt: true,
+      },
+    });
+
+    const bySymbol = new Map<string, (typeof openSignals)[number]>();
+    for (const row of openSignals) {
+      if (!bySymbol.has(row.symbol)) bySymbol.set(row.symbol, row);
+    }
+
+    const items = await Promise.all(
+      [...bySymbol.values()].map(async (row) => {
+        const entryMin = Number(row.entryMin);
+        const entryMax = Number(row.entryMax);
+        const entryMid = (entryMin + entryMax) / 2;
+        try {
+          const price = await this.metaApi.getSymbolPrice(account, row.symbol);
+          const bid = price.bid;
+          const ask = price.ask;
+          const mid = (bid + ask) / 2;
+          const spread = ask - bid;
+          const change = mid - entryMid;
+          const changePct =
+            entryMid !== 0 ? (change / entryMid) * 100 : 0;
+
+          return {
+            signalId: row.signalId,
+            symbol: row.symbol,
+            direction: row.direction,
+            entryMin,
+            entryMax,
+            entryMid,
+            bid,
+            ask,
+            mid,
+            spread,
+            change,
+            changePct,
+            time: price.time,
+            submittedAt: row.submittedAt.toISOString(),
+          };
+        } catch {
+          return {
+            signalId: row.signalId,
+            symbol: row.symbol,
+            direction: row.direction,
+            entryMin,
+            entryMax,
+            entryMid,
+            bid: null,
+            ask: null,
+            mid: null,
+            spread: null,
+            change: null,
+            changePct: null,
+            time: null,
+            submittedAt: row.submittedAt.toISOString(),
+          };
+        }
+      }),
+    );
+
+    return {
+      items,
+      refreshedAt: new Date().toISOString(),
+    };
+  }
+
+  /** Live MetaAPI quote for any chart symbol on the user's MT5 account. */
+  async getUserMt5Quote(userId: string, symbol: string) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    const canonical = normalizeChartSymbol(symbol?.trim() || '');
+    if (!canonical) {
+      throw new BadRequestException('symbol is required');
+    }
+
+    const account = await this.resolveMt5MarketDataAccount(userId);
+    const price = await this.metaApi.getSymbolPrice(account, canonical);
+    const bid = price.bid;
+    const ask = price.ask;
+    const mid = (bid + ask) / 2;
+
+    return {
+      symbol: canonical,
+      resolvedSymbol: price.symbol,
+      bid,
+      ask,
+      mid,
+      spread: ask - bid,
+      time: price.time,
+      refreshedAt: new Date().toISOString(),
+    };
+  }
+
+  /** Live OHLC candles from MetaAPI for the user's MT5 account. */
+  async getUserMt5Ohlc(
+    userId: string,
+    symbol: string,
+    timeframe: string,
+    limit?: number,
+  ) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    const canonical = normalizeChartSymbol(symbol?.trim() || '');
+    if (!canonical) {
+      throw new BadRequestException('symbol is required');
+    }
+    if (!timeframe?.trim()) {
+      throw new BadRequestException('timeframe is required');
+    }
+
+    const account = await this.resolveMt5MarketDataAccount(userId);
+    const requestedLimit = Math.min(limit ?? 400, 500);
+    const bars = await this.metaApi.getHistoricalCandles(
+      account,
+      canonical,
+      timeframe.trim(),
+      requestedLimit,
+    );
+
+    return {
+      symbol: canonical,
+      timeframe: timeframe.trim().toUpperCase(),
+      bars,
+      source: 'metaapi' as const,
+      refreshedAt: new Date().toISOString(),
+    };
+  }
+
+  /** User MT5 hub — their submitted setups on the platform MT5 account. */
+  private async loadMt5SyncPositionMap(userId: string) {
+    const links = await this.prisma.mt5SyncLink.findMany({
+      where: { userId, status: 'OPEN' },
+      include: { signal: { select: { signalId: true } } },
+    });
+    const map = new Map<string, string>();
+    for (const link of links) {
+      map.set(link.userPositionId, link.signal.signalId);
+    }
+    return map;
+  }
+
+  private shouldFilterTradesByUserComment(input: {
+    syncActive: boolean;
+    terminalAccountId?: string | null;
+    platformAccountId?: string | null;
+    evaluationAccountId?: string | null;
+  }): boolean {
+    if (input.syncActive || input.evaluationAccountId?.trim()) return false;
+    if (
+      this.usesDedicatedMt5Terminal({
+        syncActive: input.syncActive,
+        evaluationAccountId: input.evaluationAccountId,
+        terminalAccountId: input.terminalAccountId,
+        platformAccountId: input.platformAccountId,
+      })
+    ) {
+      return false;
+    }
+    const terminal = input.terminalAccountId?.trim();
+    const platform = input.platformAccountId?.trim();
+    if (!terminal || !platform) return false;
+    return terminal === platform;
+  }
+
+  private usesDedicatedMt5Terminal(input: {
+    syncActive: boolean;
+    evaluationAccountId?: string | null;
+    terminalAccountId?: string | null;
+    platformAccountId?: string | null;
+  }): boolean {
+    if (input.syncActive || input.evaluationAccountId?.trim()) return true;
+    const terminal = input.terminalAccountId?.trim();
+    const platform = input.platformAccountId?.trim();
+    if (!terminal) return false;
+    if (!platform) return true;
+    return terminal !== platform;
+  }
+
+  private resolveLiveMt5AccountId(input: {
+    syncActive: boolean;
+    metaApiAccountId?: string | null;
+    evaluationAccountId?: string | null;
+    terminalAccountId?: string | null;
+    platformAccountId?: string | null;
+  }): string | null {
+    if (input.evaluationAccountId?.trim()) {
+      return input.evaluationAccountId.trim();
+    }
+    if (input.syncActive && input.metaApiAccountId?.trim()) {
+      return input.metaApiAccountId.trim();
+    }
+    if (
+      this.usesDedicatedMt5Terminal({
+        syncActive: input.syncActive,
+        evaluationAccountId: input.evaluationAccountId,
+        terminalAccountId: input.terminalAccountId,
+        platformAccountId: input.platformAccountId,
+      })
+    ) {
+      return input.terminalAccountId?.trim() || null;
+    }
+    return null;
+  }
+
+  private async resolveEvaluationTradingAccount(userId: string) {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { selectedEvaluationEnrollmentId: true, metaApiAccountId: true },
+      });
+      if (!user) return null;
+
+      let enrollmentId = user.selectedEvaluationEnrollmentId;
+      if (!enrollmentId) {
+        const fallback = await this.prisma.evaluationEnrollment.findFirst({
+          where: {
+            userId,
+            status: { notIn: [EvaluationStatus.PENDING] },
+            metaApiAccountId: { not: null },
+          },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true },
+        });
+        enrollmentId = fallback?.id ?? null;
+      }
+      if (enrollmentId) {
+        const enrollment = await this.prisma.evaluationEnrollment.findFirst({
+          where: { id: enrollmentId, userId },
+        });
+        if (enrollment?.metaApiAccountId?.trim()) {
+          return {
+            enrollment,
+            accountId: enrollment.metaApiAccountId.trim(),
+            breached: enrollment.status === EvaluationStatus.BREACHED,
+          };
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Evaluation enrollment lookup skipped: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    }
+
+    const poolUser = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { metaApiAccountId: true },
+    });
+    const poolAccountId = poolUser?.metaApiAccountId?.trim();
+    const platformId = this.metaApi.getConfiguredDefaultAccountId()?.trim();
+    if (poolAccountId && platformId && poolAccountId !== platformId) {
+      return {
+        enrollment: null,
+        accountId: poolAccountId,
+        breached: false,
+      };
+    }
+
+    return null;
+  }
+
+  private async resolveUserMt5TerminalContext(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        role: true,
+        adminCanManageCopy: true,
+        displayName: true,
+        metaApiAccountId: true,
+        selectedEvaluationEnrollmentId: true,
+        mt5SyncActive: true,
+        mt5SyncExpiresAt: true,
+        mt5SyncEnabled: true,
+      },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const syncActive = hasActiveMt5Sync(user);
+    const platformAccountId = this.metaApi.getConfiguredDefaultAccountId();
+    const copyOwner =
+      user.adminCanManageCopy && user.role !== UserRole.ADMIN;
+
+    const evaluationCtx = await this.resolveEvaluationTradingAccount(userId);
+
+    const poolDedicated =
+      Boolean(user.metaApiAccountId?.trim()) &&
+      Boolean(platformAccountId) &&
+      user.metaApiAccountId!.trim() !== platformAccountId! &&
+      !syncActive;
+
+    const evaluationAccountId =
+      evaluationCtx?.accountId ??
+      (poolDedicated ? user.metaApiAccountId!.trim() : null);
+
+    let terminalAccountId: string | null = null;
+    if (evaluationAccountId) {
+      terminalAccountId = evaluationAccountId;
+    } else if (syncActive && user.metaApiAccountId?.trim()) {
+      terminalAccountId = user.metaApiAccountId.trim();
+    } else {
+      terminalAccountId =
+        user.metaApiAccountId?.trim() || platformAccountId || null;
+    }
+
+    return {
+      user,
+      syncActive: evaluationAccountId ? false : syncActive,
+      platformAccountId,
+      terminalAccountId,
+      copyOwner,
+      evaluationEnrollmentId: evaluationCtx?.enrollment?.id ?? null,
+      evaluationAccountId,
+      evaluationBreached: evaluationCtx?.breached ?? false,
+    };
+  }
+
+  private buildMt5LiveAccountSummary(
+    information: { balance: number; equity: number; currency: string },
+    floatingProfit: number,
+  ) {
+    const balance = Number(information.balance);
+    const equity = Number(information.equity);
+    const impliedFloating = equity - balance;
+    const floating =
+      floatingProfit !== 0 ? floatingProfit : impliedFloating;
+    return {
+      startingBalance: balance,
+      currency: information.currency || 'USD',
+      realizedProfit: 0,
+      floatingProfit: floating,
+      totalProfit: floating,
+      equity,
+    };
+  }
+
+  private async resolveCopyOwnerAccountSummary(floatingProfit?: number) {
+    const copyAccountId = await this.metaApi.resolveCopyAccountIdAsync();
+    if (!this.metaApi.isConfigured || !copyAccountId) {
+      return null;
+    }
+
+    const terminal = await this.metaApi.getTerminalState(copyAccountId);
+    if (!terminal.information) {
+      return null;
+    }
+
+    const float =
+      floatingProfit ??
+      (terminal.positions ?? []).reduce(
+        (sum, p) =>
+          sum + p.profit + p.unrealizedProfit + p.swap + p.commission,
+        0,
+      );
+
+    return this.buildMt5LiveAccountSummary(terminal.information, float);
+  }
+
+  /** MetaAPI `profit` already includes unrealized price P/L (MT5 Profit column). */
+  private metaPositionDisplayProfit(pos: { profit?: number | null }): number {
+    return Number(pos.profit ?? 0);
+  }
+
+  private async resolveMt5TerminalAccountLedger(
+    userId: string,
+    input: {
+      floatingProfit: number;
+      copyOwner: boolean;
+      syncActive: boolean;
+      metaApiAccountId: string | null;
+      evaluationAccountId?: string | null;
+      terminalAccountId?: string | null;
+      platformAccountId?: string | null;
+    },
+  ): Promise<{
+    account: Awaited<ReturnType<SignalsService['buildMt5UserAccountSummary']>>;
+    accountSource: 'virtual' | 'copy_live' | 'linked_live' | 'investor_live' | 'evaluation_live';
+  }> {
+    const {
+      floatingProfit,
+      copyOwner,
+      syncActive,
+      metaApiAccountId,
+      evaluationAccountId,
+      terminalAccountId,
+      platformAccountId,
+    } = input;
+
+    if (copyOwner) {
+      const copyAccountLedger =
+        await this.resolveCopyOwnerAccountSummary(floatingProfit);
+      if (copyAccountLedger) {
+        return { account: copyAccountLedger, accountSource: 'copy_live' };
+      }
+    }
+
+    const investorLedger = await this.buildMt5InvestorAccountSummary(
+      userId,
+      floatingProfit,
+    );
+    if (investorLedger) {
+      return { account: investorLedger, accountSource: 'investor_live' };
+    }
+
+    const liveAccountId = this.resolveLiveMt5AccountId({
+      syncActive,
+      metaApiAccountId,
+      evaluationAccountId,
+      terminalAccountId,
+      platformAccountId,
+    });
+
+    if (liveAccountId && this.metaApi.isConfigured) {
+      try {
+        const terminal = await this.metaApi.getTerminalState(liveAccountId);
+        if (terminal.information) {
+          const positionsFloating = (terminal.positions ?? []).reduce(
+            (sum, p) => sum + this.metaPositionDisplayProfit(p),
+            0,
+          );
+          const effectiveFloating =
+            floatingProfit !== 0 ? floatingProfit : positionsFloating;
+          return {
+            account: this.buildMt5LiveAccountSummary(
+              terminal.information,
+              effectiveFloating,
+            ),
+            accountSource: evaluationAccountId?.trim()
+              ? 'evaluation_live'
+              : 'linked_live',
+          };
+        }
+      } catch {
+        /* fall through to virtual ledger */
+      }
+    }
+
+    return {
+      account: await this.buildMt5UserAccountSummary(userId, floatingProfit),
+      accountSource: 'virtual',
+    };
+  }
+
+  /** Investor MT5 hub — show investment principal + platform trade P/L. */
+  private async buildMt5InvestorAccountSummary(
+    userId: string,
+    floatingProfit: number,
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        investorActive: true,
+        platformWallet: { select: { investorBalance: true } },
+      },
+    });
+    if (!user?.investorActive) return null;
+
+    const investmentBalance = Number(user.platformWallet?.investorBalance ?? 0);
+    const realizedAgg = await this.prisma.trade.aggregate({
+      where: {
+        userId,
+        closedAt: { not: null },
+        pnl: { not: null },
+        signal: { source: 'mt5_chart' },
+      },
+      _sum: { pnl: true },
+    });
+
+    const realizedProfit = Number(realizedAgg._sum.pnl ?? 0);
+    const totalProfit = realizedProfit + floatingProfit;
+
+    return {
+      startingBalance: investmentBalance,
+      currency: 'USD',
+      realizedProfit,
+      floatingProfit,
+      totalProfit,
+      equity: investmentBalance + totalProfit,
+    };
+  }
+
+  /** Risk settings for investor chart orders (investment balance as equity). */
+  private async resolveInvestorChartRisk(userId: string): Promise<{
+    riskPercent: number;
+    maxRiskAmount: number;
+    equityOverride: number;
+  } | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        investorActive: true,
+        investorSettings: { select: { riskPercent: true, paused: true } },
+        platformWallet: { select: { investorBalance: true } },
+      },
+    });
+    if (!user?.investorActive) return null;
+    if (user.investorSettings?.paused) {
+      throw new BadRequestException(
+        'Investor trading is paused — resume from Invest to place orders',
+      );
+    }
+
+    const investmentBalance = Number(user.platformWallet?.investorBalance ?? 0);
+    if (investmentBalance <= 0) {
+      throw new BadRequestException(
+        'Allocate funds to investment before trading on MT5',
+      );
+    }
+
+    const riskPercent = Number(user.investorSettings?.riskPercent ?? 2);
+    return {
+      riskPercent: Math.max(riskPercent, 0.5),
+      maxRiskAmount: Math.min(
+        MAX_RISK_PER_TRADE,
+        (investmentBalance * riskPercent) / 100,
+      ),
+      equityOverride: investmentBalance,
+    };
+  }
+
+  /** User MT5 hub — their submitted setups on the platform MT5 account. */
+  private async buildMt5UserAccountSummary(
+    userId: string,
+    floatingProfit: number,
+  ) {
+    const [config, realizedAgg] = await Promise.all([
+      this.prisma.platformConfig.findFirst({ orderBy: { id: 'asc' } }),
+      this.prisma.trade.aggregate({
+        where: {
+          userId,
+          closedAt: { not: null },
+          pnl: { not: null },
+        },
+        _sum: { pnl: true },
+      }),
+    ]);
+
+    const startingBalance = Number(config?.startingBalance ?? 1000);
+    const realizedProfit = Number(realizedAgg._sum.pnl ?? 0);
+    const totalProfit = realizedProfit + floatingProfit;
+
+    return {
+      startingBalance,
+      currency: 'USD',
+      realizedProfit,
+      floatingProfit,
+      totalProfit,
+      equity: startingBalance + totalProfit,
+    };
+  }
+
+  async getUserMt5Terminal(userId: string) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    const {
+      user,
+      syncActive,
+      platformAccountId,
+      terminalAccountId,
+      copyOwner,
+      evaluationEnrollmentId,
+      evaluationAccountId,
+    } = await this.resolveUserMt5TerminalContext(userId);
+
+    const platformTrader = {
+      displayName: user.displayName,
+      metaApiAccountId: terminalAccountId,
+    };
+
+    const [openSetups, history] = await Promise.all([
+      this.getOpenSignalsWithResolution(userId),
+      this.listUserTradeHistory(userId, 50),
+    ]);
+
+    const openSignals = await this.prisma.signal.findMany({
+      where: { userId, status: 'OPEN' },
+      include: { trade: true },
+      orderBy: { submittedAt: 'desc' },
+    });
+
+    const signalByPositionId = new Map<string, string>();
+    const signalByOrderId = new Map<string, string>();
+    const clientIdBySignalId = new Map<string, string>();
+    for (const s of openSignals) {
+      if (s.metaApiPositionId) {
+        signalByPositionId.set(s.metaApiPositionId, s.signalId);
+      }
+      if (s.metaApiOrderId) {
+        signalByOrderId.set(s.metaApiOrderId, s.signalId);
+      }
+      const { clientId } = this.metaApi.buildIdentifiersForUser(
+        user.displayName,
+        userId,
+        s.signalId,
+        s.symbol,
+      );
+      clientIdBySignalId.set(s.signalId, clientId);
+    }
+
+    const setups = await Promise.all(
+      openSetups.items.map(async (item) => {
+        const signal = openSignals.find((s) => s.signalId === item.signalId);
+        if (!signal) {
+          return { ...item, liveTrade: item.resolution.liveTrade ?? null };
+        }
+
+        const entryMin = Number(signal.entryMin);
+        const entryMax = Number(signal.entryMax);
+        const sl = Number(signal.stopLoss);
+        const oneToOnePrice = computeOneToOnePrice(
+          signal.direction,
+          entryMin,
+          entryMax,
+          sl,
+        );
+
+        const liveTrade = await this.resolveSetupLiveTrade(
+          signal,
+          userId,
+          platformTrader,
+          oneToOnePrice,
+          item.resolution.currentPrice ??
+            item.resolution.metaApiPrice ??
+            null,
+        );
+
+        return { ...item, liveTrade };
+      }),
+    );
+
+    type Mt5TradeRow = {
+      signalId: string | null;
+      symbol: string;
+      direction: string;
+      kind: 'limit' | 'running';
+      status: 'pending' | 'open';
+      entryMin?: number;
+      entryMax?: number;
+      stopLoss?: number;
+      takeProfit?: number;
+      volume?: number;
+      openPrice?: number;
+      currentPrice?: number;
+      profit?: number;
+      orderId?: string;
+      positionId?: string;
+      orderType?: string;
+      canClose: boolean;
+      canSetBreakeven?: boolean;
+      breakevenSet?: boolean;
+      canPartialClose?: boolean;
+      executionLabel?: string;
+    };
+
+    const trades: Mt5TradeRow[] = [];
+    const seenKeys = new Set<string>();
+
+    const pushTrade = (row: Mt5TradeRow) => {
+      const key =
+        row.signalId ??
+        row.positionId ??
+        row.orderId ??
+        `${row.symbol}-${row.kind}`;
+      if (seenKeys.has(key)) return;
+      seenKeys.add(key);
+      trades.push(row);
+    };
+
+    for (const setup of setups) {
+      const signal = openSignals.find((s) => s.signalId === setup.signalId);
+      const live = setup.liveTrade as Record<string, unknown> | null | undefined;
+      const liveStatus = live?.status as string | undefined;
+      const res = setup.resolution;
+
+      const isPending =
+        liveStatus === 'pending' ||
+        (Boolean(signal?.metaApiOrderId) &&
+          !setup.activated &&
+          liveStatus !== 'open');
+      const isRunning =
+        liveStatus === 'open' ||
+        setup.activated ||
+        res.executionPhase === 'running' ||
+        res.executionPhase === 'partial';
+
+      if (!isPending && !isRunning) continue;
+
+      pushTrade({
+        signalId: setup.signalId,
+        symbol: setup.symbol,
+        direction: setup.direction,
+        kind: isPending && !isRunning ? 'limit' : 'running',
+        status: isPending && !isRunning ? 'pending' : 'open',
+        entryMin: setup.entryMin,
+        entryMax: setup.entryMax,
+        stopLoss: setup.stopLoss,
+        takeProfit: setup.takeProfit,
+        volume: live?.volume != null ? Number(live.volume) : undefined,
+        openPrice:
+          live?.openPrice != null
+            ? Number(live.openPrice)
+            : live?.entryPrice != null
+              ? Number(live.entryPrice)
+              : undefined,
+        currentPrice:
+          live?.currentPrice != null ? Number(live.currentPrice) : undefined,
+        profit:
+          live?.profit != null
+            ? Number(live.profit)
+            : live?.unrealizedProfit != null
+              ? Number(live.unrealizedProfit)
+              : undefined,
+        orderId:
+          (live?.orderId as string | undefined) ??
+          signal?.metaApiOrderId ??
+          undefined,
+        positionId:
+          (live?.positionId as string | undefined) ??
+          signal?.metaApiPositionId ??
+          undefined,
+        canClose: Boolean(
+          live?.canClose ?? res.canCloseTrade ?? (isPending || isRunning),
+        ),
+        canSetBreakeven: isRunning ? Boolean(res.canSetBreakeven) : undefined,
+        breakevenSet: isRunning ? Boolean(res.breakevenSet) : undefined,
+        canPartialClose:
+          isRunning &&
+          (live?.volume != null ? Number(live.volume) > 0 : true) &&
+          Boolean(res.canCloseTrade),
+        executionLabel: res.executionLabel,
+      });
+    }
+
+    let terminalError: string | undefined;
+    if (!this.metaApi.isConfigured) {
+      terminalError = 'Live trading is not configured on the platform.';
+    } else if (!terminalAccountId) {
+      terminalError = syncActive
+        ? 'Link your MT5 trading account in Settings to use MT5 Live Sync.'
+        : 'Platform MT5 account is not configured.';
+    } else {
+      try {
+        const account = await this.metaApi.getAccount(terminalAccountId);
+        const syncPositionMap = syncActive
+          ? await this.loadMt5SyncPositionMap(userId)
+          : new Map<string, string>();
+
+        const useFullAccount = !this.shouldFilterTradesByUserComment({
+          syncActive,
+          evaluationAccountId,
+          terminalAccountId,
+          platformAccountId,
+        });
+        const [pendingOrders, openPositions] = useFullAccount
+          ? await Promise.all([
+              this.metaApi.getOrders(account),
+              this.metaApi.getPositions(account),
+            ])
+          : await Promise.all([
+              this.metaApi.findUserPendingOrders(
+                account,
+                user.displayName,
+                userId,
+              ),
+              this.metaApi.findUserOpenPositions(
+                account,
+                user.displayName,
+                userId,
+              ),
+            ]);
+
+        for (const order of pendingOrders) {
+          const signalId =
+            signalByOrderId.get(order.id) ??
+            (syncActive ? syncPositionMap.get(order.id) ?? null : null) ??
+            openSignals.find(
+              (s) => clientIdBySignalId.get(s.signalId) === order.clientId,
+            )?.signalId ??
+            null;
+          if (signalId && seenKeys.has(signalId)) continue;
+
+          const linked = signalId
+            ? openSignals.find((s) => s.signalId === signalId)
+            : null;
+
+          pushTrade({
+            signalId,
+            symbol: order.symbol,
+            direction: order.type.toLowerCase().includes('sell') ? 'SELL' : 'BUY',
+            kind: 'limit',
+            status: 'pending',
+            entryMin: linked ? Number(linked.entryMin) : undefined,
+            entryMax: linked ? Number(linked.entryMax) : undefined,
+            stopLoss: order.stopLoss ?? (linked ? Number(linked.stopLoss) : undefined),
+            takeProfit:
+              order.takeProfit ?? (linked ? Number(linked.takeProfit) : undefined),
+            volume: order.currentVolume ?? order.volume,
+            openPrice: order.openPrice,
+            currentPrice: order.currentPrice,
+            orderId: order.id,
+            orderType: order.type,
+            canClose: true,
+            executionLabel: syncActive
+              ? 'Limit order on your linked MT5'
+              : 'Limit order on platform MT5',
+          });
+        }
+
+        for (const pos of openPositions) {
+          const signalId =
+            signalByPositionId.get(pos.id) ??
+            (syncActive ? syncPositionMap.get(pos.id) ?? null : null) ??
+            openSignals.find(
+              (s) => clientIdBySignalId.get(s.signalId) === pos.clientId,
+            )?.signalId ??
+            null;
+          const key = signalId ?? pos.id;
+          if (seenKeys.has(key)) continue;
+
+          const linked = signalId
+            ? openSignals.find((s) => s.signalId === signalId)
+            : null;
+          const pnl = this.metaPositionDisplayProfit(pos);
+
+          pushTrade({
+            signalId,
+            symbol: pos.symbol,
+            direction: pos.type.toLowerCase().includes('sell') ? 'SELL' : 'BUY',
+            kind: 'running',
+            status: 'open',
+            entryMin: linked ? Number(linked.entryMin) : undefined,
+            entryMax: linked ? Number(linked.entryMax) : undefined,
+            stopLoss: pos.stopLoss,
+            takeProfit: pos.takeProfit,
+            volume: pos.volume,
+            openPrice: pos.openPrice,
+            currentPrice: pos.currentPrice,
+            profit: pnl,
+            positionId: pos.id,
+            canClose: true,
+            canSetBreakeven: linked?.trade
+              ? Boolean(
+                  linked.trade.activatedAt &&
+                    !linked.trade.tp1BreakevenAt &&
+                    (linked.trade.breakevenRetryCount ?? 0) <
+                      MAX_BREAKEVEN_RETRIES,
+                )
+              : undefined,
+            breakevenSet: linked?.trade
+              ? Boolean(linked.trade.tp1BreakevenAt)
+              : undefined,
+            canPartialClose: pos.volume > 0,
+            executionLabel: useFullAccount
+              ? syncActive
+                ? 'Running on your linked MT5'
+                : 'Running on your evaluation MT5'
+              : 'Running on platform MT5',
+          });
+        }
+      } catch (err) {
+        terminalError =
+          err instanceof Error ? err.message : 'Could not load platform MT5 state';
+        this.logger.warn(`User MT5 terminal poll failed: ${terminalError}`);
+      }
+    }
+
+    const floatingProfit = trades
+      .filter((t) => t.status === 'open' && t.profit != null)
+      .reduce((sum, t) => sum + (t.profit ?? 0), 0);
+
+    const limitCount = trades.filter((t) => t.kind === 'limit').length;
+    const runningCount = trades.filter((t) => t.kind === 'running').length;
+
+    const investor = await this.investorService.getMt5InvestmentSummary(userId);
+
+    const { account: accountLedger, accountSource } =
+      await this.resolveMt5TerminalAccountLedger(userId, {
+        floatingProfit,
+        copyOwner,
+        syncActive,
+        metaApiAccountId: user.metaApiAccountId,
+        evaluationAccountId,
+        terminalAccountId,
+        platformAccountId,
+      });
+
+    return {
+      configured: this.metaApi.isConfigured && Boolean(terminalAccountId),
+      syncActive,
+      copyOwner,
+      accountSource,
+      selectedEvaluationEnrollmentId:
+        evaluationEnrollmentId ?? user.selectedEvaluationEnrollmentId ?? null,
+      message: terminalError,
+      account: accountLedger,
+      investor: investor ?? undefined,
+      setups: {
+        items: setups,
+        count: setups.length,
+        claimableCount: openSetups.claimableCount,
+      },
+      trades,
+      history,
+      stats: {
+        openSetupCount: setups.length,
+        limitCount,
+        runningCount,
+        floatingProfit,
+        historyCount: history.count,
+      },
+      refreshedAt: new Date().toISOString(),
+    };
+  }
+
+  /** Lightweight poll for running trades only (MT5 Trades tab). */
+  async getUserMt5RunningTrades(userId: string) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    const { user, syncActive, terminalAccountId, copyOwner, evaluationAccountId, platformAccountId } =
+      await this.resolveUserMt5TerminalContext(userId);
+
+    if (!this.metaApi.isConfigured || !terminalAccountId) {
+      const { account: accountLedger, accountSource } =
+        await this.resolveMt5TerminalAccountLedger(userId, {
+          floatingProfit: 0,
+          copyOwner,
+          syncActive,
+          metaApiAccountId: user.metaApiAccountId,
+          evaluationAccountId,
+          terminalAccountId,
+          platformAccountId,
+        });
+      return {
+        trades: [],
+        account: accountLedger,
+        accountSource,
+        stats: { runningCount: 0, floatingProfit: 0 },
+        syncActive,
+        refreshedAt: new Date().toISOString(),
+      };
+    }
+
+    const openSignals = await this.prisma.signal.findMany({
+      where: { userId, status: 'OPEN' },
+      include: { trade: true },
+    });
+
+    const signalByPositionId = new Map<string, (typeof openSignals)[number]>();
+    const clientIdBySignalId = new Map<string, string>();
+    for (const s of openSignals) {
+      if (s.metaApiPositionId) {
+        signalByPositionId.set(s.metaApiPositionId, s);
+      }
+      const { clientId } = this.metaApi.buildIdentifiersForUser(
+        user.displayName,
+        userId,
+        s.signalId,
+        s.symbol,
+      );
+      clientIdBySignalId.set(s.signalId, clientId);
+    }
+
+    const syncPositionMap = syncActive
+      ? await this.loadMt5SyncPositionMap(userId)
+      : new Map<string, string>();
+
+    const account = await this.metaApi.getAccount(terminalAccountId);
+    const useFullAccount = !this.shouldFilterTradesByUserComment({
+      syncActive,
+      evaluationAccountId,
+      terminalAccountId,
+      platformAccountId,
+    });
+    const positions = useFullAccount
+      ? await this.metaApi.getPositions(account)
+      : await this.metaApi.findUserOpenPositions(
+          account,
+          user.displayName,
+          userId,
+        );
+
+    const trades = positions.map((pos) => {
+      const linkedBySync = syncActive
+        ? openSignals.find((s) => syncPositionMap.get(pos.id) === s.signalId)
+        : null;
+      const linked =
+        linkedBySync ??
+        signalByPositionId.get(pos.id) ??
+        openSignals.find(
+          (s) => clientIdBySignalId.get(s.signalId) === pos.clientId,
+        ) ??
+        null;
+      const pnl = this.metaPositionDisplayProfit(pos);
+
+      return {
+        signalId: linked?.signalId ?? null,
+        symbol: pos.symbol,
+        direction: pos.type.toLowerCase().includes('sell') ? 'SELL' : 'BUY',
+        kind: 'running' as const,
+        status: 'open' as const,
+        entryMin: linked ? Number(linked.entryMin) : undefined,
+        entryMax: linked ? Number(linked.entryMax) : undefined,
+        stopLoss: pos.stopLoss,
+        takeProfit: pos.takeProfit,
+        volume: pos.volume,
+        openPrice: pos.openPrice,
+        currentPrice: pos.currentPrice,
+        profit: pnl,
+        positionId: pos.id,
+        canClose: useFullAccount || Boolean(linked),
+        canSetBreakeven: linked?.trade
+          ? Boolean(
+              linked.trade.activatedAt &&
+                !linked.trade.tp1BreakevenAt &&
+                (linked.trade.breakevenRetryCount ?? 0) < MAX_BREAKEVEN_RETRIES,
+            )
+          : false,
+        breakevenSet: linked?.trade
+          ? Boolean(linked.trade.tp1BreakevenAt)
+          : false,
+        canPartialClose: pos.volume > 0 && Boolean(linked),
+        canAdjustStops: true,
+        executionLabel: useFullAccount
+          ? syncActive
+            ? 'Running on your linked MT5'
+            : 'Running on your evaluation MT5'
+          : 'Running on platform MT5',
+      };
+    });
+
+    const floatingProfit = trades.reduce((sum, t) => sum + (t.profit ?? 0), 0);
+
+    const { account: accountLedger, accountSource } =
+      await this.resolveMt5TerminalAccountLedger(userId, {
+        floatingProfit,
+        copyOwner,
+        syncActive,
+        metaApiAccountId: user.metaApiAccountId,
+        evaluationAccountId,
+        terminalAccountId,
+        platformAccountId,
+      });
+
+    return {
+      trades,
+      account: accountLedger,
+      accountSource,
+      stats: {
+        runningCount: trades.length,
+        floatingProfit,
+      },
+      syncActive,
+      refreshedAt: new Date().toISOString(),
+    };
+  }
+
+  /** Batch live quotes for chart watchlist symbols (cached server-side). */
+  async getUserMt5BatchQuotes(userId: string, symbols: string[]) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    const unique = [
+      ...new Set(
+        symbols
+          .map((s) => normalizeChartSymbol(s?.trim() || ''))
+          .filter(Boolean),
+      ),
+    ].slice(0, 32);
+
+    if (unique.length === 0) {
+      return { items: [], refreshedAt: new Date().toISOString() };
+    }
+
+    let account;
+    try {
+      account = await this.resolveMt5MarketDataAccount(userId);
+    } catch {
+      return { items: [], refreshedAt: new Date().toISOString() };
+    }
+
+    const items = await Promise.all(
+      unique.map(async (symbol) => {
+        try {
+          const price = await this.metaApi.getSymbolPrice(account, symbol);
+          const bid = price.bid;
+          const ask = price.ask;
+          return {
+            symbol,
+            resolvedSymbol: price.symbol,
+            bid,
+            ask,
+            mid: (bid + ask) / 2,
+            spread: ask - bid,
+            time: price.time,
+          };
+        } catch {
+          return {
+            symbol,
+            resolvedSymbol: symbol,
+            bid: null,
+            ask: null,
+            mid: null,
+            spread: null,
+            time: null,
+          };
+        }
+      }),
+    );
+
+    return { items, refreshedAt: new Date().toISOString() };
+  }
+
+  private computeMt5ChartDefaultStops(
+    direction: TradeDirection,
+    entry: number,
+    symbol: string,
+    digits: number,
+  ) {
+    const pipSize = getPipSize(symbol);
+    const slDistance = defaultMt5ChartSlPips(symbol) * pipSize;
+    const stopLoss = roundToSymbolDigits(
+      direction === 'BUY' ? entry - slDistance : entry + slDistance,
+      digits,
+    );
+    const takeProfit = roundToSymbolDigits(
+      computeOneToOnePrice(direction, entry, entry, stopLoss),
+      digits,
+    );
+    return { stopLoss, takeProfit, slPips: defaultMt5ChartSlPips(symbol) };
+  }
+
+  private validateMt5ChartStops(
+    direction: TradeDirection,
+    entry: number,
+    stopLoss: number,
+    takeProfit: number,
+  ) {
+    if (direction === 'BUY') {
+      if (stopLoss >= entry) {
+        throw new BadRequestException(
+          'Stop loss must be below entry for a BUY order',
+        );
+      }
+      if (takeProfit <= entry) {
+        throw new BadRequestException(
+          'Take profit must be above entry for a BUY order',
+        );
+      }
+      return;
+    }
+    if (stopLoss <= entry) {
+      throw new BadRequestException(
+        'Stop loss must be above entry for a SELL order',
+      );
+    }
+    if (takeProfit >= entry) {
+      throw new BadRequestException(
+        'Take profit must be below entry for a SELL order',
+      );
+    }
+  }
+
+  private async resolveMt5ChartTradingAccount(userId: string) {
+    const { user, copyOwner, terminalAccountId } =
+      await this.resolveUserMt5TerminalContext(userId);
+    if (copyOwner) {
+      throw new BadRequestException(
+        'Quick chart orders are not available on the MT5 Copy account',
+      );
+    }
+
+    const dbUser = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { virtualAccount: true },
+    });
+    if (!dbUser) throw new NotFoundException('User not found');
+
+    const accountId =
+      terminalAccountId || this.metaApi.resolveAccountId(dbUser.metaApiAccountId);
+    if (!accountId) {
+      throw new BadRequestException(
+        dbUser.investorActive
+          ? 'Platform MT5 is not configured — try again shortly or contact support'
+          : 'No trading account linked — select an evaluation account or link one in Settings',
+      );
+    }
+
+    return { user: dbUser, accountId };
+  }
+
+  async previewMt5MarketOrder(
+    userId: string,
+    symbolRaw: string,
+    directionRaw: string,
+    volumeRaw?: number,
+  ) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    if (!this.metaApi.isConfigured) {
+      throw new ServiceUnavailableException(
+        'Live trading is not configured on the server',
+      );
+    }
+
+    const symbol = normalizeChartSymbol(symbolRaw?.trim() || '');
+    if (!symbol) {
+      throw new BadRequestException('Symbol is required');
+    }
+
+    const direction =
+      directionRaw?.toUpperCase() === 'SELL'
+        ? TradeDirection.SELL
+        : directionRaw?.toUpperCase() === 'BUY'
+          ? TradeDirection.BUY
+          : null;
+    if (!direction) {
+      throw new BadRequestException('Direction must be BUY or SELL');
+    }
+
+    const { user, accountId } = await this.resolveMt5ChartTradingAccount(userId);
+    const account = await this.metaApi.getAccount(accountId);
+    const price = await this.metaApi.getSymbolPrice(account, symbol);
+    const spec = await this.metaApi.getSymbolSpecification(account, symbol);
+    const digits = spec.digits ?? 5;
+    const entry = direction === TradeDirection.BUY ? price.ask : price.bid;
+    const defaults = this.computeMt5ChartDefaultStops(
+      direction,
+      entry,
+      symbol,
+      digits,
+    );
+
+    const investorRisk = await this.resolveInvestorChartRisk(userId);
+    const riskPercent = investorRisk
+      ? investorRisk.riskPercent
+      : Number(user.virtualAccount?.riskPercent ?? RISK_PERCENT);
+    const maxRiskAmount = investorRisk
+      ? investorRisk.maxRiskAmount
+      : Number(user.virtualAccount?.maxRiskPerTrade ?? MAX_RISK_PER_TRADE);
+
+    const sizing = await this.tradeRisk.calculatePositionSize({
+      account,
+      symbol,
+      direction,
+      entryPrice: entry,
+      stopLoss: defaults.stopLoss,
+      takeProfit: defaults.takeProfit,
+      riskPercent: Math.max(riskPercent, RISK_PERCENT),
+      maxRiskAmount,
+      equityOverride: investorRisk?.equityOverride,
+      fixedVolume:
+        volumeRaw != null && Number.isFinite(volumeRaw) && volumeRaw > 0
+          ? volumeRaw
+          : undefined,
+      skipAiReview: true,
+    });
+
+    return {
+      symbol,
+      direction,
+      entry,
+      stopLoss: defaults.stopLoss,
+      takeProfit: defaults.takeProfit,
+      defaultSlPips: defaults.slPips,
+      riskRewardRatio: 1,
+      quote: price,
+      risk: {
+        volume: sizing.volume,
+        riskPercent: sizing.riskPercent,
+        riskAmount: sizing.riskAmount,
+        estimatedLossAtSl: sizing.estimatedLossAtSl,
+        accountEquity: sizing.accountEquity,
+        currency: sizing.currency,
+      },
+      refreshedAt: new Date().toISOString(),
+    };
+  }
+
+  async placeMt5MarketOrder(userId: string, dto: PlaceMt5MarketOrderDto) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    if (!this.metaApi.isConfigured) {
+      throw new ServiceUnavailableException(
+        'Live trading is not configured on the server',
+      );
+    }
+
+    const symbol = normalizeChartSymbol(dto.symbol?.trim() || '');
+    if (!symbol) {
+      throw new BadRequestException('Symbol is required');
+    }
+
+    const { user, accountId } = await this.resolveMt5ChartTradingAccount(userId);
+    const account = await this.metaApi.getAccount(accountId);
+    const price = await this.metaApi.getSymbolPrice(account, symbol);
+    const spec = await this.metaApi.getSymbolSpecification(account, symbol);
+    const digits = spec.digits ?? 5;
+    const entry = dto.direction === TradeDirection.BUY ? price.ask : price.bid;
+
+    const stopLoss = roundToSymbolDigits(Number(dto.stopLoss), digits);
+    const takeProfit = roundToSymbolDigits(Number(dto.takeProfit), digits);
+    this.validateMt5ChartStops(dto.direction, entry, stopLoss, takeProfit);
+
+    const risk = Math.abs(entry - stopLoss);
+    const reward = Math.abs(takeProfit - entry);
+    const riskRewardRatio =
+      risk > 0 ? Number((reward / risk).toFixed(2)) : 0;
+
+    const investorRisk = await this.resolveInvestorChartRisk(userId);
+    const riskPercent = investorRisk
+      ? investorRisk.riskPercent
+      : Number(user.virtualAccount?.riskPercent ?? RISK_PERCENT);
+    const maxRiskAmount = investorRisk
+      ? investorRisk.maxRiskAmount
+      : Number(user.virtualAccount?.maxRiskPerTrade ?? MAX_RISK_PER_TRADE);
+
+    const screenshotHash = createHash('sha256')
+      .update(`mt5-chart:${userId}:${symbol}:${Date.now()}`)
+      .digest('hex');
+
+    const signal = await this.prisma.signal.create({
+      data: {
+        userId,
+        symbol,
+        direction: dto.direction,
+        entryMin: entry,
+        entryMax: entry,
+        stopLoss,
+        takeProfit,
+        riskRewardRatio,
+        description: `MT5 chart ${dto.direction} — ${symbol}`,
+        screenshotUrl: MT5_SYNC_PLACEHOLDER_SCREENSHOT,
+        screenshotHash,
+        source: 'mt5_chart',
+        status: 'OPEN',
+      },
+    });
+
+    const { comment: orderComment, clientId } = buildMetaApiTradeIdentifiers({
+      displayName: user.displayName,
+      userId,
+      signalId: signal.signalId,
+      symbol,
+    });
+
+    const riskInput = {
+      account,
+      symbol,
+      direction: dto.direction,
+      stopLoss,
+      takeProfit,
+      riskPercent: Math.max(riskPercent, RISK_PERCENT),
+      maxRiskAmount,
+      equityOverride: investorRisk?.equityOverride,
+      skipAiReview: true,
+    };
+
+    const sizing = await this.tradeRisk.calculatePositionSize({
+      ...riskInput,
+      entryPrice: entry,
+      fixedVolume:
+        dto.volume != null && Number.isFinite(dto.volume) && dto.volume > 0
+          ? dto.volume
+          : undefined,
+    });
+
+    let placed;
+    try {
+      placed = await this.metaApi.placeMarketOrder({
+        account,
+        symbol,
+        direction: dto.direction,
+        volume: sizing.volume,
+        stopLoss,
+        takeProfit,
+        price,
+        specDigits: spec.digits,
+        comment: orderComment,
+        clientId,
+      });
+    } catch (err) {
+      await this.prisma.signal.delete({ where: { id: signal.id } });
+      throw err;
+    }
+
+    const result = placed.trade;
+    const now = new Date();
+    const entryPrice = entry;
+
+    const trade = await this.prisma.trade.create({
+      data: {
+        signalId: signal.id,
+        userId,
+        symbol,
+        direction: dto.direction,
+        entryMin: entryPrice,
+        entryMax: entryPrice,
+        stopLoss,
+        takeProfit,
+        entryPrice,
+        activatedAt: now,
+      },
+    });
+
+    await this.prisma.signal.update({
+      where: { id: signal.id },
+      data: {
+        metaApiAccountId: account.id,
+        metaApiOrderId: result.orderId ?? null,
+        metaApiPositionId: result.positionId ?? result.orderId ?? null,
+        metaApiExecutedAt: now,
+      },
+    });
+
+    await this.priceMonitor.ensureTradeActivated(trade, signal, entryPrice);
+
+    await this.mirrorToCopyPool({
+      signal,
+      user,
+      openPrice: entryPrice,
+      pending: false,
+    });
+
+    return {
+      status: 'placed',
+      signalId: signal.signalId,
+      symbol,
+      direction: dto.direction,
+      entryPrice,
+      stopLoss,
+      takeProfit,
+      pending: false,
+      orderKind:
+        dto.direction === TradeDirection.BUY
+          ? 'ORDER_TYPE_BUY'
+          : 'ORDER_TYPE_SELL',
+      quote: price,
+      risk: {
+        volume: sizing.volume,
+        riskPercent: sizing.riskPercent,
+        riskAmount: sizing.riskAmount,
+        estimatedLossAtSl: sizing.estimatedLossAtSl,
+        accountEquity: sizing.accountEquity,
+        currency: sizing.currency,
+        aiManaged: sizing.aiManaged,
+        notes: sizing.aiNotes,
+      },
+      metaApi: {
+        accountId: account.id,
+        accountName: account.name,
+        orderId: result.orderId,
+        positionId: result.positionId,
+        message: result.message,
+        comment: orderComment,
+        orderKind:
+          dto.direction === TradeDirection.BUY
+            ? 'ORDER_TYPE_BUY'
+            : 'ORDER_TYPE_SELL',
+      },
+    };
+  }
+
+  async listUserTradeHistory(userId: string, limit = 50) {
+    await this.compliance.requireActiveTrader(userId);
+    const take = Math.min(Math.max(limit, 1), 100);
+
+    const rows = await this.prisma.signal.findMany({
+      where: {
+        userId,
+        status: { in: ['WON', 'LOST', 'ARCHIVED', 'CANCELLED'] },
+      },
+      orderBy: [{ resolvedAt: 'desc' }, { submittedAt: 'desc' }],
+      take,
+      include: { trade: true },
+    });
+
+    const items = rows.map((row) => {
+      const pnl =
+        row.pnl != null
+          ? Number(row.pnl)
+          : row.trade?.pnl != null
+            ? Number(row.trade.pnl)
+            : null;
+      const closedAt = row.trade?.closedAt ?? row.resolvedAt ?? row.submittedAt;
+
+      return {
+        id: row.id,
+        signalId: row.signalId,
+        symbol: row.symbol,
+        direction: row.direction,
+        status: row.status,
+        entryMin: Number(row.entryMin),
+        entryMax: Number(row.entryMax),
+        stopLoss: Number(row.stopLoss),
+        takeProfit: Number(row.takeProfit),
+        entryPrice:
+          row.trade?.entryPrice != null ? Number(row.trade.entryPrice) : null,
+        exitPrice:
+          row.trade?.exitPrice != null ? Number(row.trade.exitPrice) : null,
+        pnl,
+        isWin: row.trade?.isWin ?? (row.status === 'WON' ? true : row.status === 'LOST' ? false : null),
+        submittedAt: row.submittedAt.toISOString(),
+        closedAt: closedAt.toISOString(),
+      };
+    });
+
+    return { items, count: items.length };
+  }
+
+  async modifyUserMt5PositionStops(
+    userId: string,
+    positionId: string,
+    dto: ModifyMt5PositionStopsDto,
+  ) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    if (dto.stopLoss === undefined && dto.takeProfit === undefined) {
+      throw new BadRequestException('Provide stopLoss and/or takeProfit to update');
+    }
+
+    if (!this.metaApi.isConfigured) {
+      throw new ServiceUnavailableException('Live trading is not configured');
+    }
+
+    const linkedSignal = await this.prisma.signal.findFirst({
+      where: {
+        userId,
+        status: 'OPEN',
+        OR: [
+          { metaApiPositionId: positionId },
+          { metaApiOrderId: positionId },
+        ],
+      },
+    });
+
+    if (linkedSignal) {
+      const result = await this.updateSetupStops(userId, linkedSignal.signalId, dto);
+      return {
+        ok: true,
+        positionId,
+        signalId: linkedSignal.signalId,
+        stopLoss: result.stopLoss,
+        takeProfit: result.takeProfit,
+        message: result.message,
+      };
+    }
+
+    const { user, syncActive, terminalAccountId } =
+      await this.resolveUserMt5TerminalContext(userId);
+
+    if (!terminalAccountId) {
+      throw new ServiceUnavailableException('Platform MT5 account is not configured');
+    }
+
+    const account = await this.metaApi.ensureAccountReady(terminalAccountId);
+
+    const positions = syncActive
+      ? await this.metaApi.getPositions(account)
+      : await this.metaApi.findUserOpenPositions(
+          account,
+          user.displayName,
+          userId,
+        );
+
+    const pos = positions.find((p) => p.id === positionId);
+    if (pos) {
+      const direction: TradeDirection = pos.type
+        .toLowerCase()
+        .includes('sell')
+        ? 'SELL'
+        : 'BUY';
+      const nextSl =
+        dto.stopLoss !== undefined ? dto.stopLoss : pos.stopLoss;
+      const nextTp =
+        dto.takeProfit !== undefined ? dto.takeProfit : pos.takeProfit;
+
+      this.validatePositionStopLevels(
+        direction,
+        pos.openPrice,
+        dto.stopLoss !== undefined ? nextSl : undefined,
+        dto.takeProfit !== undefined ? nextTp : undefined,
+      );
+
+      const spec = await this.metaApi.getSymbolSpecification(account, pos.symbol);
+
+      await this.metaApi.modifyPositionStops(account, {
+        positionId,
+        ...(dto.stopLoss !== undefined ? { stopLoss: dto.stopLoss } : {}),
+        ...(dto.takeProfit !== undefined ? { takeProfit: dto.takeProfit } : {}),
+        specDigits: spec.digits,
+      });
+
+      return {
+        ok: true,
+        positionId,
+        stopLoss: nextSl ?? null,
+        takeProfit: nextTp ?? null,
+        message: 'Stop levels updated on broker',
+      };
+    }
+
+    const orders = syncActive
+      ? await this.metaApi.getOrders(account)
+      : await this.metaApi.findUserPendingOrders(
+          account,
+          user.displayName,
+          userId,
+        );
+
+    const order = orders.find((o) => o.id === positionId);
+    if (!order) {
+      throw new ForbiddenException('Position or order not found on your account');
+    }
+
+    const direction: TradeDirection = order.type
+      .toLowerCase()
+      .includes('sell')
+      ? 'SELL'
+      : 'BUY';
+    const nextSl =
+      dto.stopLoss !== undefined ? dto.stopLoss : order.stopLoss;
+    const nextTp =
+      dto.takeProfit !== undefined ? dto.takeProfit : order.takeProfit;
+
+    this.validatePositionStopLevels(
+      direction,
+      order.openPrice,
+      dto.stopLoss !== undefined ? nextSl : undefined,
+      dto.takeProfit !== undefined ? nextTp : undefined,
+    );
+
+    const spec = await this.metaApi.getSymbolSpecification(account, order.symbol);
+
+    await this.metaApi.modifyPendingOrderStops(account, {
+      orderId: positionId,
+      ...(dto.stopLoss !== undefined ? { stopLoss: dto.stopLoss } : {}),
+      ...(dto.takeProfit !== undefined ? { takeProfit: dto.takeProfit } : {}),
+      specDigits: spec.digits,
+    });
+
+    return {
+      ok: true,
+      positionId,
+      stopLoss: nextSl ?? null,
+      takeProfit: nextTp ?? null,
+      message: 'Pending order stop levels updated on broker',
+    };
+  }
+
+  async closeUserMetaApiPosition(userId: string, positionId: string) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    if (!this.metaApi.isConfigured) {
+      throw new ServiceUnavailableException('Live trading is not configured');
+    }
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    const platformAccountId = this.metaApi.getConfiguredDefaultAccountId();
+    if (!platformAccountId) {
+      throw new ServiceUnavailableException('Platform MT5 account is not configured');
+    }
+
+    const linkedSignal = await this.prisma.signal.findFirst({
+      where: {
+        userId,
+        status: 'OPEN',
+        OR: [
+          { metaApiPositionId: positionId },
+          { metaApiOrderId: positionId },
+        ],
+      },
+    });
+
+    if (linkedSignal) {
+      return this.closeSetupTrade(userId, linkedSignal.signalId);
+    }
+
+    const account = await this.metaApi.ensureAccountReady(platformAccountId);
+    const owned = await this.metaApi.findUserOpenPositions(
+      account,
+      user.displayName,
+      userId,
+    );
+    if (!owned.some((p) => p.id === positionId)) {
+      const pending = await this.metaApi.findUserPendingOrders(
+        account,
+        user.displayName,
+        userId,
+      );
+      if (!pending.some((o) => o.id === positionId)) {
+        throw new ForbiddenException('Order or position not found for your setups');
+      }
+      await this.metaApi.cancelPendingOrder(account, positionId);
+      return { ok: true, positionId, status: 'cancelled' };
+    }
+
+    await this.metaApi.closePositionById(account, positionId);
+    return { ok: true, positionId, status: 'closed' };
+  }
+
+  /** Close every running MT5 position owned by the user on platform account. */
+  async closeAllUserMt5Positions(userId: string) {
+    await this.compliance.requireEvaluationTradingAccess(userId);
+
+    const running = await this.getUserMt5RunningTrades(userId);
+    const results: {
+      symbol: string;
+      signalId?: string | null;
+      positionId?: string;
+      status: string;
+      error?: string;
+    }[] = [];
+
+    for (const trade of running.trades) {
+      try {
+        if (trade.signalId) {
+          const r = await this.closeSetupTrade(userId, trade.signalId);
+          results.push({
+            symbol: trade.symbol,
+            signalId: trade.signalId,
+            positionId: trade.positionId,
+            status: String(r.status ?? 'closed'),
+          });
+        } else if (trade.positionId) {
+          const r = await this.closeUserMetaApiPosition(
+            userId,
+            trade.positionId,
+          );
+          results.push({
+            symbol: trade.symbol,
+            positionId: trade.positionId,
+            status: String(r.status ?? 'closed'),
+          });
+        }
+      } catch (err) {
+        results.push({
+          symbol: trade.symbol,
+          signalId: trade.signalId,
+          positionId: trade.positionId,
+          status: 'error',
+          error: err instanceof Error ? err.message : 'Close failed',
+        });
+      }
+    }
+
+    const closed = results.filter((r) => r.status !== 'error').length;
+    const failed = results.filter((r) => r.status === 'error').length;
+
+    return {
+      ok: failed === 0,
+      closed,
+      failed,
+      total: running.trades.length,
+      results,
+      refreshedAt: new Date().toISOString(),
+    };
+  }
+
+  private async resolveSystemUserId(): Promise<string> {
+    const existing = await this.prisma.user.findFirst({
+      where: { email: 'system-signals@traderrank.internal' },
+      select: { id: true },
+    });
+    if (existing) return existing.id;
+
+    const created = await this.prisma.user.create({
+      data: {
+        email: 'system-signals@traderrank.internal',
+        displayName: 'Platform Signals',
+        status: 'ACTIVE',
+        emailVerified: true,
+        registrationPaid: true,
+        role: 'ADMIN',
+      },
+    });
+    await this.prisma.virtualAccount.create({
+      data: { userId: created.id },
+    });
+    return created.id;
+  }
+
+  async publishSystemSignal(input: {
+    symbol: string;
+    direction: TradeDirection;
+    entryMin: number;
+    entryMax: number;
+    stopLoss: number;
+    description?: string;
+    openPrice?: number;
+  }) {
+    const userId = await this.resolveSystemUserId();
+    const entryMid = computeEntryMid(input.entryMin, input.entryMax);
+    const takeProfit = computeTwoToOnePrice(
+      input.direction,
+      input.entryMin,
+      input.entryMax,
+      input.stopLoss,
+    );
+    const openPrice = input.openPrice ?? entryMid;
+    const slDist = Math.abs(entryMid - input.stopLoss);
+    const rr = slDist > 0 ? Math.abs(takeProfit - entryMid) / slDist : 2;
+
+    const signal = await this.prisma.signal.create({
+      data: {
+        userId,
+        symbol: input.symbol,
+        direction: input.direction,
+        entryMin: input.entryMin,
+        entryMax: input.entryMax,
+        stopLoss: input.stopLoss,
+        takeProfit,
+        riskRewardRatio: rr,
+        description: input.description ?? 'Platform system signal (1:2 RR)',
+        screenshotUrl: '/uploads/system-signal.png',
+        status: 'OPEN',
+        signalSource: SignalSource.SYSTEM,
+        source: 'system',
+        resolvedAt: null,
+      },
+    });
+
+    const trade = await this.prisma.trade.create({
+      data: {
+        signalId: signal.id,
+        userId,
+        symbol: input.symbol,
+        direction: input.direction,
+        entryMin: input.entryMin,
+        entryMax: input.entryMax,
+        stopLoss: input.stopLoss,
+        takeProfit,
+        entryPrice: openPrice,
+        activatedAt: new Date(),
+      },
+    });
+
+    await this.priceMonitor.ensureTradeActivated(trade, signal, openPrice);
+
+    await this.mirrorToCopyPool({
+      signal,
+      user: { id: userId, displayName: 'Platform Signals' },
+      openPrice,
+      pending: false,
+    });
+
+    return {
+      signalId: signal.signalId,
+      symbol: signal.symbol,
+      direction: signal.direction,
+      takeProfit: Number(takeProfit),
+      openPrice,
+    };
+  }
+
+  async ingestExternalSignal(dto: IngestExternalSignalDto) {
+    const symbol = normalizeChartSymbol(
+      (dto.symbol ?? dto.pair ?? '').trim(),
+    );
+    if (!symbol) {
+      throw new BadRequestException('pair or symbol is required');
+    }
+
+    const stopLoss = dto.stop_loss ?? dto.sl;
+    const takeProfit = dto.take_profit ?? dto.tp;
+    if (stopLoss == null || !Number.isFinite(stopLoss)) {
+      throw new BadRequestException('sl or stop_loss is required');
+    }
+    if (takeProfit == null || !Number.isFinite(takeProfit)) {
+      throw new BadRequestException('tp or take_profit is required');
+    }
+
+    let entryMin = dto.entry_min;
+    let entryMax = dto.entry_max;
+    const singleEntry = dto.entry ?? dto.entry_price;
+    if (entryMin == null && entryMax == null) {
+      if (singleEntry == null || !Number.isFinite(singleEntry)) {
+        throw new BadRequestException(
+          'entry (or entry_price), or entry_min + entry_max, is required',
+        );
+      }
+      const spread = Math.max(Math.abs(singleEntry) * 0.00005, 1e-5);
+      entryMin = singleEntry - spread;
+      entryMax = singleEntry + spread;
+    } else if (entryMin == null || entryMax == null) {
+      throw new BadRequestException(
+        'Provide both entry_min and entry_max, or a single entry price',
+      );
+    }
+
+    const description =
+      (dto.comment ?? dto.description ?? 'External API signal').trim() ||
+      'External API signal';
+
+    const externalId = dto.external_id?.trim();
+    if (externalId) {
+      const existing = await this.prisma.signal.findUnique({
+        where: { signalId: externalId },
+        include: { trade: true },
+      });
+      if (existing) {
+        return {
+          status: 'exists',
+          signalId: existing.signalId,
+          symbol: existing.symbol,
+          direction: existing.direction,
+          entry: {
+            min: Number(existing.entryMin),
+            max: Number(existing.entryMax),
+          },
+          stopLoss: Number(existing.stopLoss),
+          takeProfit: Number(existing.takeProfit),
+          comment: existing.description,
+          setupStatus: existing.status,
+        };
+      }
+    }
+
+    const createDto: CreateSignalDto = {
+      symbol,
+      direction: dto.direction,
+      entryMin,
+      entryMax,
+      stopLoss,
+      takeProfit,
+      riskRewardRatio: 0,
+      description,
+      screenshotUrl: '/uploads/external-signal.png',
+    };
+
+    this.validateEntryRange(createDto);
+
+    const mid = computeEntryMid(entryMin, entryMax);
+    const slDist = Math.abs(mid - stopLoss);
+    createDto.riskRewardRatio =
+      slDist > 0
+        ? Math.round((Math.abs(takeProfit - mid) / slDist) * 100) / 100
+        : 0;
+
+    const userId = await this.resolveExternalSignalUserId();
+    const displayName =
+      process.env.EXTERNAL_SIGNAL_SENDER_NAME?.trim() || 'API Signals';
+    const openPrice =
+      singleEntry != null && Number.isFinite(singleEntry)
+        ? singleEntry
+        : createDto.direction === 'BUY'
+          ? entryMin
+          : entryMax;
+    const pending = true;
+
+    const signal = await this.prisma.signal.create({
+      data: {
+        ...(externalId ? { signalId: externalId } : {}),
+        userId,
+        symbol: createDto.symbol,
+        direction: createDto.direction,
+        entryMin: createDto.entryMin,
+        entryMax: createDto.entryMax,
+        stopLoss: createDto.stopLoss,
+        takeProfit: createDto.takeProfit,
+        riskRewardRatio: createDto.riskRewardRatio,
+        description: createDto.description,
+        screenshotUrl: createDto.screenshotUrl,
+        status: 'OPEN',
+        signalSource: SignalSource.EXTERNAL,
+        source: 'external_api',
+      },
+    });
+
+    await this.prisma.trade.create({
+      data: {
+        signalId: signal.id,
+        userId,
+        symbol: createDto.symbol,
+        direction: createDto.direction,
+        entryMin: createDto.entryMin,
+        entryMax: createDto.entryMax,
+        stopLoss: createDto.stopLoss,
+        takeProfit: createDto.takeProfit,
+        entryPrice: openPrice,
+      },
+    });
+
+    void this.mirrorToCopyPool({
+      signal,
+      user: { id: userId, displayName },
+      openPrice,
+      pending,
+    }).catch((err) => {
+      this.logger.warn(
+        `External signal mirror failed for ${signal.signalId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    });
+
+    return {
+      status: 'created',
+      signalId: signal.signalId,
+      symbol: signal.symbol,
+      direction: signal.direction,
+      entry: {
+        min: Number(signal.entryMin),
+        max: Number(signal.entryMax),
+        mid,
+      },
+      stopLoss: Number(signal.stopLoss),
+      takeProfit: Number(signal.takeProfit),
+      riskRewardRatio: Number(signal.riskRewardRatio),
+      comment: signal.description,
+      setupStatus: signal.status,
+      submittedAt: signal.submittedAt.toISOString(),
+      mirrored: {
+        investors: true,
+        mt5Copy: true,
+        openPrice,
+        pending,
+      },
+    };
+  }
+
+  private async resolveExternalSignalUserId(): Promise<string> {
+    const email =
+      process.env.EXTERNAL_SIGNAL_USER_EMAIL?.trim() ||
+      'external-signals@traderrank.internal';
+    const displayName =
+      process.env.EXTERNAL_SIGNAL_SENDER_NAME?.trim() || 'API Signals';
+
+    const existing = await this.prisma.user.findFirst({
+      where: { email },
+      select: { id: true },
+    });
+    if (existing) return existing.id;
+
+    const created = await this.prisma.user.create({
+      data: {
+        email,
+        displayName,
+        status: 'ACTIVE',
+        emailVerified: true,
+        registrationPaid: true,
+        role: 'TRADER',
+      },
+    });
+    await this.prisma.virtualAccount.create({
+      data: { userId: created.id },
+    });
+    return created.id;
+  }
+}
