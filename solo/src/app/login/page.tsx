@@ -275,10 +275,10 @@ function LoginForm() {
                 </div>
               </form>
             )}
-            <p className="mt-6 text-center text-sm text-gray-400">
+            <p className="mt-6 text-center text-sm text-muted">
               New here?{" "}
               <Link href="/register" className="text-primary hover:underline">
-                Invite-only registration
+                Create an account
               </Link>
             </p>
           </CardContent>
