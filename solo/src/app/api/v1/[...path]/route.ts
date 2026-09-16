@@ -39,7 +39,7 @@ async function proxyRequest(req: NextRequest, path: string[]) {
     return NextResponse.json(
       {
         message:
-          "Backend API unreachable. Set API_URL to the Solo API (e.g. http://localhost:4001).",
+          "Backend API unreachable. Set API_URL on solo-web to your solo-api origin (https://….onrender.com).",
       },
       { status: 502 },
     );

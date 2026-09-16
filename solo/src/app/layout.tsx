@@ -16,10 +16,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Trade Guard Solo",
+  title: "solo Emma",
   description:
     "Wallet, Smart Invest, and blockchain contract — deposit, earn, withdraw.",
-  keywords: ["investing", "smart invest", "USDT", "trade guard", "solo"],
+  keywords: ["investing", "smart invest", "USDT", "solo Emma"],
 };
 
 /** Lock zoom/pinch-resize on phones so the trading UI stays fixed. */

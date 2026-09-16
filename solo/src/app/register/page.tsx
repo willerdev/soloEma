@@ -83,7 +83,7 @@ export default function RegisterPage() {
           <CardHeader className="text-center">
             <CardTitle className="text-2xl">Create your account</CardTitle>
             <CardDescription>
-              Trade Guard Solo — wallet, Smart Invest, and contract
+              solo Emma — wallet, Smart Invest, and contract
             </CardDescription>
           </CardHeader>
           <CardContent>

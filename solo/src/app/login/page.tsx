@@ -191,7 +191,7 @@ function LoginForm() {
             </CardTitle>
             <CardDescription>
               {step === "credentials"
-                ? "Sign in to Trade Guard Solo"
+                ? "Sign in to solo Emma"
                 : `We sent a 6-digit code to ${email}`}
             </CardDescription>
           </CardHeader>

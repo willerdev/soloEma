@@ -128,29 +128,6 @@ function PublicHeader() {
         <Link href="/" className="flex items-center">
           <Logo className="text-lg" />
         </Link>
-        <div className="flex items-center gap-2 sm:gap-3">
-          <Link
-            href="/terms"
-            className="hidden text-sm text-gray-400 transition-colors hover:text-gray-200 sm:inline"
-          >
-            Terms
-          </Link>
-          <Link href="/invest">
-            <Button size="sm" className="gap-1">
-              Invest
-            </Button>
-          </Link>
-          <Link href="/login">
-            <Button variant="ghost" size="sm">
-              Login
-            </Button>
-          </Link>
-          <Link href="/register">
-            <Button size="sm" variant="secondary">
-              Register
-            </Button>
-          </Link>
-        </div>
       </div>
     </header>
   );
@@ -164,14 +141,14 @@ function SidebarBrand({ expanded }: { expanded: boolean }) {
         "flex h-14 shrink-0 items-center gap-3 px-3",
         !expanded && "justify-center px-0",
       )}
-      title="Trade Guard"
+      title="solo Emma"
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary ring-1 ring-primary/25">
         <ShieldCheck className="h-5 w-5" strokeWidth={2.5} />
       </span>
       {expanded && (
         <span className="truncate font-bold text-foreground">
-          Trade<span className="text-primary">Guard</span>
+          solo<span className="text-primary">Emma</span>
         </span>
       )}
     </Link>

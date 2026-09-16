@@ -8,9 +8,14 @@ export function Logo({
 }: {
   className?: string;
   compact?: boolean;
-  /** Collapsed sidebar: icon mark; expands to full wordmark on hover */
   sidebar?: boolean;
 }) {
+  const wordmark = (
+    <span className={cn("font-bold text-foreground", className)}>
+      solo<span className="text-primary">Emma</span>
+    </span>
+  );
+
   if (sidebar) {
     return (
       <>
@@ -32,23 +37,11 @@ export function Logo({
             "group-focus-within/sidebar:max-w-[11rem] group-focus-within/sidebar:opacity-100",
           )}
         >
-          Trade<span className="text-primary">Guard</span>
+          solo<span className="text-primary">Emma</span>
         </span>
       </>
     );
   }
 
-  if (compact) {
-    return (
-      <span className={cn("font-bold text-foreground", className)}>
-        Trade<span className="text-primary">Guard</span>
-      </span>
-    );
-  }
-
-  return (
-    <span className={cn("font-bold text-foreground", className)}>
-      Trade<span className="text-primary">Guard</span>
-    </span>
-  );
+  return wordmark;
 }
