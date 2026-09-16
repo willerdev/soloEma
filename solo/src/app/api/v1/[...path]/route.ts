@@ -8,8 +8,37 @@ function backendOrigin(): string {
   return raw.replace(/\/$/, "").replace(/\/api\/v1$/i, "");
 }
 
+function originHost(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 async function proxyRequest(req: NextRequest, path: string[]) {
-  const target = `${backendOrigin()}/api/v1/${path.join("/")}${req.nextUrl.search}`;
+  const origin = backendOrigin();
+  const incomingHost = (
+    req.headers.get("x-forwarded-host") ||
+    req.headers.get("host") ||
+    req.nextUrl.hostname
+  )
+    .split(",")[0]
+    .trim()
+    .toLowerCase()
+    .replace(/:\d+$/, "");
+
+  if (originHost(origin) && originHost(origin) === incomingHost) {
+    return NextResponse.json(
+      {
+        message:
+          "API_URL is set to this website (solo-web), which causes a loop. Set API_URL to the solo-api URL from Render (the backend service), with no /api/v1.",
+      },
+      { status: 500 },
+    );
+  }
+
+  const target = `${origin}/api/v1/${path.join("/")}${req.nextUrl.search}`;
 
   const headers = new Headers();
   req.headers.forEach((value, key) => {
