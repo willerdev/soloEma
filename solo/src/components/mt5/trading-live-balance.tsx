@@ -10,6 +10,7 @@ type Props = {
   currency: string;
   live: boolean;
   linked: boolean;
+  floating?: number;
 };
 
 export function TradingLiveBalance({
@@ -18,45 +19,71 @@ export function TradingLiveBalance({
   currency,
   live,
   linked,
+  floating = 0,
 }: Props) {
   if (!linked) return null;
 
   return (
-    <div className="flex min-w-0 flex-1 items-baseline gap-3 sm:justify-center">
-      <div className="min-w-0">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted">
-          Equity
-        </p>
-        <p className="truncate text-2xl font-bold tabular-nums leading-none text-foreground sm:text-3xl">
-          {fmtMt5Price(equity)}
-          <span className="ml-1.5 text-sm font-semibold text-muted">
-            {currency}
-          </span>
-        </p>
-        <p className="mt-1 text-[11px] text-muted">
-          Balance {fmtMt5Price(balance)}
-        </p>
+    <section className="mx-3 shrink-0 md:mx-5">
+      <div className="flex flex-col gap-4 rounded-2xl border border-border bg-surface px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-7 sm:py-5">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-muted">
+            Equity
+          </p>
+          <p className="mt-1.5 flex flex-wrap items-end gap-x-3 gap-y-1">
+            <span className="text-4xl font-bold tabular-nums leading-none tracking-tight text-foreground sm:text-5xl">
+              {fmtMt5Price(equity)}
+            </span>
+            <span className="pb-0.5 text-lg font-semibold text-muted">
+              {currency}
+            </span>
+          </p>
+          <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted">
+            <span>
+              Balance{" "}
+              <strong className="font-semibold tabular-nums text-foreground">
+                {fmtMt5Price(balance)}
+              </strong>
+            </span>
+            <span>
+              Floating{" "}
+              <strong
+                className={cn(
+                  "font-semibold tabular-nums",
+                  floating > 0
+                    ? "text-success"
+                    : floating < 0
+                      ? "text-danger"
+                      : "text-foreground",
+                )}
+              >
+                {fmtMt5Price(floating)}
+              </strong>
+            </span>
+          </div>
+        </div>
+
+        <span
+          className={cn(
+            "inline-flex w-fit items-center gap-2 self-start rounded-full px-3.5 py-1.5 text-xs font-bold uppercase tracking-wide sm:self-center",
+            live
+              ? "bg-success/15 text-success"
+              : "past-data-label bg-amber-500/15 text-amber-300",
+          )}
+        >
+          {live ? (
+            <>
+              <span className="live-status-dot text-success" aria-hidden />
+              Live
+            </>
+          ) : (
+            <>
+              <Radio className="h-3.5 w-3.5" />
+              Past data
+            </>
+          )}
+        </span>
       </div>
-      <span
-        className={cn(
-          "inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide",
-          live
-            ? "bg-success/15 text-success"
-            : "past-data-label bg-amber-500/15 text-amber-300",
-        )}
-      >
-        {live ? (
-          <>
-            <span className="live-status-dot text-success" aria-hidden />
-            Live
-          </>
-        ) : (
-          <>
-            <Radio className="h-3 w-3" />
-            Past data
-          </>
-        )}
-      </span>
-    </div>
+    </section>
   );
 }

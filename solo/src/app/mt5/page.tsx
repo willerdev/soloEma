@@ -147,13 +147,6 @@ export default function SoloMt5Page() {
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">
           Trading
         </h1>
-        <TradingLiveBalance
-          equity={equity}
-          balance={walletBalance}
-          currency={account?.currency ?? "USD"}
-          live={live}
-          linked={linked}
-        />
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {linked && !live && (
             <button
@@ -200,7 +193,16 @@ export default function SoloMt5Page() {
         <p className="px-4 pb-2 text-sm text-danger md:px-5">{error}</p>
       )}
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 pb-4 md:flex-row md:px-5">
+      <TradingLiveBalance
+        equity={equity}
+        balance={walletBalance}
+        currency={account?.currency ?? "USD"}
+        live={live}
+        linked={linked}
+        floating={account?.floatingProfit ?? 0}
+      />
+
+      <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 pb-4 pt-3 md:flex-row md:px-5">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-surface">
             {loading && !data ? (
