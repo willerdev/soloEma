@@ -373,6 +373,38 @@ class ApiClient {
       this.request<{ connected: boolean }>("/metaapi/token", {
         method: "DELETE",
       }),
+    accounts: () =>
+      this.request<{
+        items: Array<{
+          id: string;
+          login: string;
+          name: string;
+          server: string;
+          state: string;
+          connectionStatus: string;
+          region: string;
+          selected: boolean;
+        }>;
+        selectedId: string | null;
+      }>("/metaapi/accounts"),
+    linkAccount: (accountId: string, token?: string) =>
+      this.request<{
+        accountId: string;
+        account: {
+          id: string;
+          login: string;
+          name: string;
+          server: string;
+          state: string;
+          connectionStatus: string;
+        };
+      }>("/metaapi/account", {
+        method: "PUT",
+        body: JSON.stringify({
+          accountId,
+          ...(token?.trim() ? { token: token.trim() } : {}),
+        }),
+      }),
   };
 
   users = {

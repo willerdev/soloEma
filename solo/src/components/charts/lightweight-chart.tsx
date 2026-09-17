@@ -78,6 +78,7 @@ type Props = {
     source?: "metaapi" | "quote-fallback";
     error?: string | null;
   }) => void;
+  forceTheme?: "dark" | "light";
 };
 
 function dataOptionsForLoad(reason: ChartLoadReason): SetChartDataOptions {
@@ -114,10 +115,12 @@ export const LightweightChart = forwardRef<LightweightChartHandle, Props>(
       eraseTargets = [],
       onLoadingChange,
       onChartStatusChange,
+      forceTheme,
     },
     ref,
   ) {
-    const theme = useThemeStore((s) => s.theme);
+    const storeTheme = useThemeStore((s) => s.theme);
+    const theme = forceTheme ?? storeTheme;
     const chart = useLightweightChart(theme, symbol);
     const [dragPrices, setDragPrices] = useState<Record<string, number>>({});
     const [dragError, setDragError] = useState<string | null>(null);

@@ -13,6 +13,7 @@ import { AuthLoadingScreen, useRequireAuth } from "@/hooks/use-require-auth";
 import { useThemeStore } from "@/stores/theme";
 import { api } from "@/lib/api";
 import { MetaApiTokenCard } from "@/components/mt5/metaapi-token-card";
+import { MetaApiAccountPicker } from "@/components/mt5/metaapi-account-picker";
 
 export default function SettingsPage() {
   const { ready } = useRequireAuth();
@@ -27,6 +28,7 @@ export default function SettingsPage() {
   const [derivMsg, setDerivMsg] = useState("");
   const [derivErr, setDerivErr] = useState("");
   const [saving, setSaving] = useState(false);
+  const [metaOk, setMetaOk] = useState(false);
 
   useEffect(() => {
     if (!ready) return;
@@ -108,7 +110,8 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      <MetaApiTokenCard />
+      <MetaApiTokenCard onChanged={setMetaOk} />
+      {metaOk && <MetaApiAccountPicker enabled={metaOk} />}
 
       <Card>
         <CardHeader>

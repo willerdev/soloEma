@@ -107,10 +107,10 @@ const NAV_GROUPS: NavGroup[] = [
       },
       {
         href: "/mt5",
-        label: "Charts",
-        shortLabel: "Charts",
+        label: "Trading",
+        shortLabel: "Trade",
         icon: CandlestickChart,
-        keywords: "mt5 chart live trades metaapi",
+        keywords: "mt5 chart live trades metaapi trading",
       },
     ],
   },

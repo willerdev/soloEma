@@ -146,6 +146,91 @@ export class SoloMt5Service {
     return { connected: false };
   }
 
+  async listCloudAccounts(userId: string) {
+    const token = await this.decryptCloudToken(userId);
+    if (!token) {
+      throw new BadRequestException(
+        'Paste your MetaAPI token first, then the account ID to monitor.',
+      );
+    }
+    const listed = await this.metaApi.runWithToken(token, () =>
+      this.metaApi.listAccounts({ limit: 100 }),
+    );
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { metaApiAccountId: true },
+    });
+    const selectedId = user?.metaApiAccountId?.trim() || null;
+    const items = listed.items.map((row) => ({
+      id: row.id,
+      login: row.login,
+      name: row.name,
+      server: row.server,
+      state: row.state,
+      connectionStatus: row.connectionStatus,
+      region: row.region,
+      selected: row.id === selectedId,
+    }));
+    return { items, selectedId };
+  }
+
+  async linkCloudAccount(
+    userId: string,
+    accountIdRaw: string,
+    tokenRaw?: string,
+  ) {
+    if (tokenRaw?.trim()) {
+      await this.saveCloudToken(userId, tokenRaw);
+    }
+
+    const accountId = accountIdRaw.replace(/\s+/g, '').trim().toLowerCase();
+    if (!accountId) {
+      throw new BadRequestException('Paste the MetaAPI account ID to monitor.');
+    }
+    const token = await this.decryptCloudToken(userId);
+    if (!token) {
+      throw new BadRequestException(
+        'Paste your MetaAPI API token together with the account ID.',
+      );
+    }
+    let account: MetaApiAccount;
+    try {
+      account = await this.metaApi.runWithToken(token, () =>
+        this.metaApi.getAccount(accountId),
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Account lookup failed';
+      throw new BadRequestException(
+        /404|not found/i.test(msg)
+          ? 'That MetaAPI account ID is not on this token. Copy the ID from the top of the account card in app.metaapi.cloud.'
+          : msg,
+      );
+    }
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        metaApiAccountId: account.id,
+        mt5SyncActive: true,
+        mt5SyncEnabled: true,
+        mt5SyncEnrolledAt: new Date(),
+        mt5SyncExpiresAt: null,
+      },
+    });
+
+    return {
+      accountId: account.id,
+      account: {
+        id: account.id,
+        login: account.login,
+        name: account.name,
+        server: account.server,
+        state: account.state,
+        connectionStatus: account.connectionStatus,
+      },
+    };
+  }
+
   async terminal(userId: string) {
     return this.withCloud(userId, () => this.loadTerminal(userId));
   }
@@ -154,12 +239,12 @@ export class SoloMt5Service {
     const linked = await this.linkedAccountId(userId);
     if (!this.metaApi.isConfigured) {
       return this.emptyTerminal(
-        'Paste your MetaAPI token in Settings, then connect an MT5 login.',
+        'Paste your MetaAPI token and the account ID you want to monitor.',
       );
     }
     if (!linked) {
       return this.emptyTerminal(
-        'Connect your MT5 account (login, password, server) to load live charts and pin trades.',
+        'Paste the MetaAPI account ID you want to monitor (from the account card).',
       );
     }
 
@@ -789,13 +874,13 @@ export class SoloMt5Service {
   private async requireAccount(userId: string) {
     if (!this.metaApi.isConfigured) {
       throw new ServiceUnavailableException(
-        'Paste your MetaAPI token in Settings, then connect an MT5 login.',
+        'Paste your MetaAPI token and the account ID you want to monitor.',
       );
     }
     const id = await this.linkedAccountId(userId);
     if (!id) {
       throw new BadRequestException(
-        'Connect your MT5 account first (login, password, server).',
+        'Paste the MetaAPI account ID you want to monitor.',
       );
     }
     const account = await this.metaApi.ensureAccountReady(id);

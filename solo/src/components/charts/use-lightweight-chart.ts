@@ -121,7 +121,7 @@ export function useLightweightChart(
       const chart = lc.createChart(containerRef.current, createChartOptions(theme));
       const series = chart.addSeries(
         lc.CandlestickSeries,
-        createCandlestickSeriesOptions(pf) as CandlestickSeriesPartialOptions,
+        createCandlestickSeriesOptions(pf, theme) as CandlestickSeriesPartialOptions,
       );
       markersRef.current = lc.createSeriesMarkers(
         series,
@@ -234,9 +234,9 @@ export function useLightweightChart(
     if (!seriesRef.current) return;
     const pf = priceFormatForSymbol(sym);
     seriesRef.current.applyOptions(
-      createCandlestickSeriesOptions(pf) as CandlestickSeriesPartialOptions,
+      createCandlestickSeriesOptions(pf, theme) as CandlestickSeriesPartialOptions,
     );
-  }, []);
+  }, [theme]);
 
   useEffect(() => {
     if (!seriesRef.current || !ready) return;

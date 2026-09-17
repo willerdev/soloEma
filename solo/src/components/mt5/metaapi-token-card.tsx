@@ -42,7 +42,7 @@ export function MetaApiTokenCard({ compact = false, onChanged }: Props) {
       setConnected(true);
       setMasked(res.tokenMasked);
       setToken("");
-      setMsg("MetaAPI token saved. Add your MT5 login below or on Charts.");
+      setMsg("Token saved. Paste the MetaAPI account ID below to monitor it.");
       onChanged?.(true);
     } catch (error) {
       setErr(error instanceof Error ? error.message : "Could not save token");
@@ -131,9 +131,9 @@ export function MetaApiTokenCard({ compact = false, onChanged }: Props) {
       <CardHeader>
         <CardTitle>MetaAPI</CardTitle>
         <CardDescription>
-          Sign in at app.metaapi.cloud, copy your API token, then add an MT5
-          account with login, password, and broker server. The token stays on
-          your Solo user record (encrypted). It is not required on Render.
+          Sign in at app.metaapi.cloud, copy your API token, then paste the
+          account ID from the account card (the UUID at the top). You do not
+          enter MT5 login or password.
         </CardDescription>
       </CardHeader>
       <CardContent>{body}</CardContent>

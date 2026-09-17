@@ -54,6 +54,14 @@ import {
 import { useChartTools } from "@/hooks/use-chart-tools";
 import { useChartLiveQuotes } from "@/hooks/use-chart-live-quotes";
 
+const TF_DESK_LABEL: Record<ChartTimeframe, string> = {
+  M1: "1m",
+  M5: "5m",
+  M15: "15m",
+  H1: "1h",
+  D1: "1D",
+};
+
 type Props = {
   quotes: UserMt5QuoteItem[];
   runningTrades: UserMt5Trade[];
@@ -70,6 +78,9 @@ type Props = {
   chartOnly?: boolean;
   onStopsUpdated?: () => void;
   onTradePlaced?: () => void;
+  forceChartTheme?: "dark" | "light";
+  showTradeBar?: boolean;
+  workspaceLayout?: boolean;
 };
 
 function toSetupSummary(setup: OpenSetupItem): SetupSummary {
@@ -108,6 +119,9 @@ export function Mt5ChartTerminal({
   chartOnly = false,
   onStopsUpdated,
   onTradePlaced,
+  forceChartTheme,
+  showTradeBar = false,
+  workspaceLayout = false,
 }: Props) {
   const chartRef = useRef<LightweightChartHandle>(null);
   const [orderModal, setOrderModal] = useState<"BUY" | "SELL" | null>(null);
@@ -426,6 +440,7 @@ export function Mt5ChartTerminal({
     <div
       className={cn(
         "flex min-h-0 flex-col bg-[var(--mt5-bg)]",
+        forceChartTheme === "light" && "mt5-shell",
         chartOnly
           ? "h-full min-h-0 flex-1 overflow-hidden pb-[calc(4.25rem+env(safe-area-inset-bottom,0px))] md:pb-0"
           : desktopTerminal
@@ -434,7 +449,7 @@ export function Mt5ChartTerminal({
       )}
       data-mt5-chart-terminal
     >
-      {/* Toolbar — pair search + settings (timeframes via radial on chart) */}
+      {!workspaceLayout && (
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--mt5-divider)] bg-[var(--mt5-surface)] px-2 py-1.5 lg:px-3">
         <ChartSymbolPicker
           compact
@@ -490,8 +505,69 @@ export function Mt5ChartTerminal({
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--mt5-muted)]" />
         )}
       </div>
+      )}
 
-        {overlaySummary.total > 0 && (
+      <div
+        className={
+          workspaceLayout ? "flex min-h-0 min-w-0 flex-1" : "contents"
+        }
+      >
+        {workspaceLayout && (
+          <div className="flex w-11 shrink-0 flex-col items-center border-r border-slate-100 bg-white py-2">
+            <ChartToolsToolbar
+              orientation="vertical"
+              activeTool={activeTool}
+              onToolChange={setActiveTool}
+              onDone={cancelTool}
+              alerts={alerts}
+              pendingTrend={pendingTrend != null}
+              onRemoveAlert={removeAlert}
+              onClearTriggered={clearTriggeredAlerts}
+            />
+          </div>
+        )}
+        <div
+          className={
+            workspaceLayout
+              ? "flex min-h-0 min-w-0 flex-1 flex-col"
+              : "contents"
+          }
+        >
+          {workspaceLayout && (
+            <div className="flex shrink-0 items-center gap-1 border-b border-slate-100 px-2 py-1.5">
+              {CHART_TIMEFRAMES.map((tf) => (
+                <button
+                  key={tf}
+                  type="button"
+                  onClick={() => handleTimeframeChange(tf)}
+                  className={cn(
+                    "rounded-md px-2 py-1 text-xs font-medium",
+                    timeframe === tf
+                      ? "bg-slate-900 text-white"
+                      : "text-slate-500 hover:bg-slate-100",
+                  )}
+                >
+                  {TF_DESK_LABEL[tf]}
+                </button>
+              ))}
+              <ChartSymbolPicker
+                compact
+                selectedSymbol={selectedSymbol}
+                watchlist={watchlist}
+                onSelect={handleSymbolChange}
+                onAdd={handleAddSymbol}
+                onRemove={removeSymbol}
+                searchInputRef={symbolSearchRef}
+                className="ml-2 min-w-0 max-w-[14rem]"
+                hideChips
+              />
+              <span className="ml-auto hidden text-xs text-slate-400 sm:inline">
+                Indicators
+              </span>
+            </div>
+          )}
+
+        {overlaySummary.total > 0 && !workspaceLayout && (
           <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--mt5-divider)] bg-[var(--mt5-surface)] px-2 py-1 text-[9px] font-medium text-[var(--mt5-muted)]">
             {overlaySummary.running > 0 && (
               <span className="rounded bg-[#4a9eff]/15 px-1.5 py-0.5 text-[#4a9eff]">
@@ -541,8 +617,9 @@ export function Mt5ChartTerminal({
       >
         <ChartUserWatermark
           name={userDisplayName}
-          visible={chartSettings.showWatermark}
+          visible={chartSettings.showWatermark && !workspaceLayout}
         />
+        {!workspaceLayout && (
         <Mt5ChartSymbolOverlay
           symbol={selectedSymbol}
           timeframe={timeframe}
@@ -550,10 +627,12 @@ export function Mt5ChartTerminal({
           chartError={chartStatus.error}
           onSymbolClick={focusSymbolSearch}
         />
+        )}
         <ChartAlertToastStack
           toasts={alertToasts}
           onDismiss={dismissToast}
         />
+        {!workspaceLayout && (
         <div className="absolute left-2 right-2 top-10 z-[12] flex md:hidden">
           <ChartToolsToolbar
             activeTool={activeTool}
@@ -565,6 +644,8 @@ export function Mt5ChartTerminal({
             onClearTriggered={clearTriggeredAlerts}
           />
         </div>
+        )}
+        {!workspaceLayout && (
         <Mt5ChartRadialMenu
           open={radialOpen}
           anchor={radialAnchor}
@@ -577,6 +658,7 @@ export function Mt5ChartTerminal({
           }}
           onTool={handleRadialTool}
         />
+        )}
         <div
           className={cn(
             "relative z-[2] h-full w-full transition-opacity duration-300",
@@ -593,7 +675,7 @@ export function Mt5ChartTerminal({
             priceLines={chartPriceLines}
             draggableLines={chartSettings.showSlTp && activeTool === "select"}
             onPriceLineDragEnd={handlePriceLineDragEnd}
-            onChartTap={handleChartTap}
+            onChartTap={workspaceLayout ? undefined : handleChartTap}
             chartTool={activeTool}
             onChartPointClick={handleChartPoint}
             drawings={drawings}
@@ -603,6 +685,7 @@ export function Mt5ChartTerminal({
             onEraseAlert={removeAlert}
             eraseTargets={eraseTargets}
             className="h-full w-full"
+            forceTheme={forceChartTheme}
             onLoadingChange={handleChartLoadingChange}
             onChartStatusChange={setChartStatus}
           />
@@ -628,6 +711,8 @@ export function Mt5ChartTerminal({
             {chartStatus.error}
           </div>
         )}
+      </div>
+        </div>
       </div>
 
       {chartOnly && orderActionBar}
@@ -774,7 +859,7 @@ export function Mt5ChartTerminal({
         </div>
       )}
 
-      {showOrdersPanel && !chartOnly && orderActionBar}
+      {(showOrdersPanel || showTradeBar) && !chartOnly && orderActionBar}
 
       {orderModal && (
         <Mt5PlaceOrderModal

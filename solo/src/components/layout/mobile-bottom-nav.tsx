@@ -94,7 +94,7 @@ export function MobileBottomNav({
         <NavTab href="/dashboard" label="Home" icon={Home} active={homeActive} />
         <NavTab href="/invest" label="Invest" icon={TrendingUp} active={investActive} emphasize />
         <NavTab href="/wallet" label="Wallet" icon={PiggyBank} active={walletActive} />
-        <NavTab href="/mt5" label="Charts" icon={CandlestickChart} active={chartsActive} />
+        <NavTab href="/mt5" label="Trade" icon={CandlestickChart} active={chartsActive} />
         <NavTab
           label="More"
           icon={MoreHorizontal}

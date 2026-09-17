@@ -1,15 +1,25 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { Loader2 } from "lucide-react";
+import {
+  Bell,
+  ClipboardList,
+  Loader2,
+  Plus,
+  Star,
+  Zap,
+} from "lucide-react";
 import { api, type UserMt5Trade } from "@/lib/api";
 import { AuthLoadingScreen, useRequireAuth } from "@/hooks/use-require-auth";
 import { useAuthStore } from "@/stores/auth";
 import { useMt5Terminal } from "@/hooks/use-mt5-terminal";
 import { Mt5ChartTerminal } from "@/components/mt5/mt5-chart-terminal";
-import { Mt5LiveSyncCard } from "@/components/mt5/mt5-live-sync-card";
-import { MetaApiTokenCard } from "@/components/mt5/metaapi-token-card";
+import { TradingConnectDialog } from "@/components/mt5/trading-connect-dialog";
 import { pickDefaultChartSymbol } from "@/lib/chart-market-status";
+import { useChartWatchlist } from "@/components/charts/use-chart-watchlist";
+import { cn } from "@/lib/utils";
+
+type RightTab = "watchlist" | "alerts" | "plan";
 
 export default function SoloMt5Page() {
   const { ready, hasHydrated } = useRequireAuth();
@@ -17,7 +27,9 @@ export default function SoloMt5Page() {
   const [selectedChartSymbol, setSelectedChartSymbol] = useState<string | null>(
     null,
   );
-  const [cloudConnected, setCloudConnected] = useState(false);
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [rightTab, setRightTab] = useState<RightTab>("alerts");
+  const { watchlist, addSymbol } = useChartWatchlist();
 
   const {
     data,
@@ -54,12 +66,13 @@ export default function SoloMt5Page() {
       pickDefaultChartSymbol([
         displayRunningTrades[0]?.symbol,
         quotes[0]?.symbol,
+        watchlist[0],
       ]),
-    [selectedChartSymbol, displayRunningTrades, quotes],
+    [selectedChartSymbol, displayRunningTrades, quotes, watchlist],
   );
 
   const linked = Boolean(data?.account);
-  const needsConnect = Boolean(data?.message) && !linked && !loading;
+  const needsConnect = !linked && !loading;
 
   const handleCloseTrade = useCallback(
     async (trade: UserMt5Trade) => {
@@ -77,66 +90,197 @@ export default function SoloMt5Page() {
     [load, loadRunning, setError],
   );
 
+  function afterLinked() {
+    void load({ background: false });
+    void loadRunning();
+  }
+
   if (!ready) return <AuthLoadingScreen />;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-[var(--color-border)] px-4 py-3">
-        <h1 className="text-xl font-bold text-white">Charts</h1>
-        <p className="mt-0.5 text-sm text-muted">
-          Paste your MetaAPI token, add this MT5 login, then pin live trades as
-          entry, stop, and take-profit lines.
-        </p>
-      </div>
+    <div className="solo-trading-desk flex min-h-[calc(100dvh-5.5rem)] flex-col bg-[#F3F4FA] text-slate-900 md:min-h-[calc(100dvh-0.25rem)]">
+      <header className="flex shrink-0 flex-wrap items-center gap-3 px-4 py-3 md:px-5">
+        <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
+          Trading
+        </h1>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              if (!linked) setConnectOpen(true);
+            }}
+            className="inline-flex items-center gap-1.5 rounded-full bg-[#22C55E] px-4 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-[#16A34A]"
+          >
+            <Zap className="h-3.5 w-3.5" />
+            Trade
+          </button>
+          <span className="hidden items-center rounded-full bg-[#6D5EF6] px-3 py-1.5 text-xs font-medium text-white sm:inline-flex">
+            Pre-Market Routine 0/3
+          </span>
+        </div>
+      </header>
 
       {error && (
-        <p className="px-4 py-2 text-sm text-danger">{error}</p>
+        <p className="px-4 pb-2 text-sm text-red-600 md:px-5">{error}</p>
       )}
 
-      {(needsConnect || !linked) && (
-        <div className="space-y-3 px-4 py-3">
-          <MetaApiTokenCard compact onChanged={setCloudConnected} />
-          {cloudConnected && (
-            <Mt5LiveSyncCard
-              tradingActive
-              linkedAccountId={null}
-              onAccountLinked={() => {
-                void load({ background: false });
-              }}
-            />
-          )}
-        </div>
-      )}
+      <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 pb-4 md:flex-row md:px-5">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+            {loading && !data ? (
+              <div className="flex flex-1 items-center justify-center py-24">
+                <Loader2 className="h-7 w-7 animate-spin text-slate-400" />
+              </div>
+            ) : (
+              <div className="min-h-[52vh] flex-1 md:min-h-0">
+                <Mt5ChartTerminal
+                  quotes={quotes}
+                  runningTrades={displayRunningTrades}
+                  limitTrades={limitTrades}
+                  setups={[]}
+                  account={data?.account}
+                  accountSource={data?.accountSource}
+                  selectedSymbol={chartSymbol}
+                  onSelectSymbol={(sym) => {
+                    setSelectedChartSymbol(sym);
+                    addSymbol(sym);
+                  }}
+                  onOpenSetup={() => undefined}
+                  onCloseTrade={(trade) => void handleCloseTrade(trade)}
+                  onStopsUpdated={() => {
+                    void load({ background: true });
+                    void loadRunning();
+                  }}
+                  onTradePlaced={() => {
+                    void load({ background: true });
+                    void loadRunning();
+                  }}
+                  showOrdersPanel={false}
+                  showTradeBar={false}
+                  forceChartTheme="light"
+                  workspaceLayout
+                />
+              </div>
+            )}
 
-      {loading && !data ? (
-        <div className="flex flex-1 items-center justify-center py-16">
-          <Loader2 className="h-7 w-7 animate-spin text-primary" />
+            {needsConnect && (
+              <div className="border-t border-slate-100 px-4 py-8 text-center sm:px-8">
+                <h2 className="text-lg font-semibold text-slate-900">
+                  Connect your trading account before you trade
+                </h2>
+                <p className="mx-auto mt-2 max-w-lg text-sm text-slate-500">
+                  To use the trading workspace, you&apos;ll need to connect your
+                  trading account first. Once connected, you can start taking
+                  trades inside your workflow.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setConnectOpen(true)}
+                  className="mt-5 inline-flex items-center gap-2 rounded-full bg-[#6D5EF6] px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-[#6D5EF6]/30 hover:bg-[#5B4CE8]"
+                >
+                  <Plus className="h-4 w-4" />
+                  Connect Trading Account
+                </button>
+                <p className="mt-3 text-xs text-slate-400">
+                  Need help connecting?
+                </p>
+              </div>
+            )}
+          </div>
         </div>
-      ) : (
-        <div className="min-h-[70vh] flex-1">
-          <Mt5ChartTerminal
-            quotes={quotes}
-            runningTrades={displayRunningTrades}
-            limitTrades={limitTrades}
-            setups={[]}
-            account={data?.account}
-            accountSource={data?.accountSource}
-            selectedSymbol={chartSymbol}
-            onSelectSymbol={setSelectedChartSymbol}
-            onOpenSetup={() => undefined}
-            onCloseTrade={(trade) => void handleCloseTrade(trade)}
-            onStopsUpdated={() => {
-              void load({ background: true });
-              void loadRunning();
-            }}
-            onTradePlaced={() => {
-              void load({ background: true });
-              void loadRunning();
-            }}
-            showOrdersPanel
-          />
-        </div>
-      )}
+
+        <aside className="flex w-full shrink-0 flex-col gap-3 md:w-[22rem]">
+          <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm">
+            <p className="text-sm font-semibold text-slate-800">Discipline</p>
+            <div className="mt-3 space-y-2">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <div
+                  key={n}
+                  className="h-8 rounded-lg bg-slate-100/90"
+                  style={{ width: `${88 - n * 6}%` }}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
+            <div className="flex border-b border-slate-100 text-xs font-medium">
+              {(
+                [
+                  ["watchlist", "Watchlist", Star],
+                  ["alerts", "Alerts", Bell],
+                  ["plan", "Trading Plan", ClipboardList],
+                ] as const
+              ).map(([id, label, Icon]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setRightTab(id)}
+                  className={cn(
+                    "flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5",
+                    rightTab === id
+                      ? "border-b-2 border-[#6D5EF6] text-slate-900"
+                      : "text-slate-400 hover:text-slate-600",
+                  )}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="min-h-[12rem] flex-1 overflow-y-auto p-3">
+              {rightTab === "watchlist" && (
+                <ul className="space-y-1">
+                  {watchlist.map((sym) => (
+                    <li key={sym}>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedChartSymbol(sym)}
+                        className={cn(
+                          "w-full rounded-lg px-3 py-2 text-left text-sm",
+                          chartSymbol === sym
+                            ? "bg-[#6D5EF6]/10 font-semibold text-[#5B4CE8]"
+                            : "text-slate-700 hover:bg-slate-50",
+                        )}
+                      >
+                        {sym}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {rightTab === "alerts" && (
+                <div className="space-y-2 pt-1">
+                  {[1, 2, 3, 4, 5, 6].map((n) => (
+                    <div
+                      key={n}
+                      className="h-7 rounded-lg bg-slate-100"
+                      style={{ width: `${94 - n * 5}%` }}
+                    />
+                  ))}
+                </div>
+              )}
+              {rightTab === "plan" && (
+                <div className="space-y-2 pt-1">
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <div
+                      key={n}
+                      className="h-7 rounded-lg bg-slate-100"
+                      style={{ width: `${90 - n * 7}%` }}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <TradingConnectDialog
+        open={connectOpen}
+        onClose={() => setConnectOpen(false)}
+        onLinked={afterLinked}
+      />
     </div>
   );
 }
