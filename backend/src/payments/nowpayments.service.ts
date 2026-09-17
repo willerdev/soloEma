@@ -1,6 +1,13 @@
 import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHmac } from 'crypto';
+import { PrismaService } from '../prisma/prisma.service';
+import { resolveJwtSecret } from '../config/jwt-secret';
+import {
+  decryptCredential,
+  encryptCredential,
+} from '../common/credential-crypto.util';
+import { isSoloApp } from '../common/app-variant';
 
 const NETWORK_CURRENCY: Record<string, string> = {
   TRC20: 'usdttrc20',
@@ -37,7 +44,13 @@ export class NowPaymentsService {
   private static readonly STATUS_TTL_MS = 45_000;
   private static readonly MAX_429_RETRIES = 3;
 
-  constructor(private config: ConfigService) {
+  private credsCache: { email: string; password: string; at: number } | null =
+    null;
+
+  constructor(
+    private config: ConfigService,
+    private prisma: PrismaService,
+  ) {
     this.apiUrl =
       this.config.get<string>('NOWPAYMENTS_API_URL') ||
       'https://api.nowpayments.io/v1';
@@ -45,8 +58,8 @@ export class NowPaymentsService {
     if (this.apiKey) {
       this.logger.log(
         `NOWPayments API key loaded · payout email ${
-          this.payoutEmail() ? 'set' : 'MISSING'
-        } · payout password ${this.payoutPassword() ? 'set' : 'MISSING'}`,
+          this.envPayoutEmail() ? 'set' : 'MISSING'
+        } · payout password ${this.envPayoutPassword() ? 'set' : 'MISSING'}`,
       );
     }
   }
@@ -58,21 +71,86 @@ export class NowPaymentsService {
   get isPayoutConfigured(): boolean {
     return (
       this.isConfigured &&
-      Boolean(this.payoutEmail()) &&
-      Boolean(this.payoutPassword())
+      Boolean(this.envPayoutEmail()) &&
+      Boolean(this.envPayoutPassword())
     );
   }
 
-  /** Safe diagnostics for admin UI — never returns secret values. */
-  getPayoutConfigStatus() {
-    const emailSet = Boolean(this.payoutEmail());
-    const passwordSet = Boolean(this.payoutPassword());
+  /** Safe diagnostics — never returns secret values. */
+  async getPayoutConfigStatus() {
+    const { email, password } = await this.resolvePayoutCreds();
+    const emailSet = Boolean(email);
+    const passwordSet = Boolean(password);
     return {
       apiKeySet: this.isConfigured,
       payoutEmailSet: emailSet,
+      payoutEmailMasked: emailSet ? this.maskEmail(email) : null,
       payoutPasswordSet: passwordSet,
       payoutConfigured: this.isConfigured && emailSet && passwordSet,
+      shared: isSoloApp(),
     };
+  }
+
+  async isPayoutReady(): Promise<boolean> {
+    const status = await this.getPayoutConfigStatus();
+    return status.payoutConfigured;
+  }
+
+  private maskEmail(email: string) {
+    const [user, domain] = email.split('@');
+    if (!domain) return '••••';
+    const head = user.slice(0, 2);
+    return `${head}••••@${domain}`;
+  }
+
+  invalidatePayoutCredsCache() {
+    this.credsCache = null;
+    this.payoutToken = null;
+    this.payoutTokenExpiry = 0;
+  }
+
+  async saveSharedPayoutLogin(input: {
+    email: string;
+    password: string;
+    userId: string;
+  }) {
+    const email = input.email.trim().toLowerCase();
+    const password = input.password.trim();
+    if (!email.includes('@') || email.length < 5) {
+      throw new HttpException(
+        'Enter the NOWPayments account email.',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    if (password.length < 4) {
+      throw new HttpException(
+        'Enter the NOWPayments account password.',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    const enc = encryptCredential(password, this.cryptoSecret());
+    await this.prisma.platformConfig.upsert({
+      where: { id: 'default' },
+      create: {
+        id: 'default',
+        nowpaymentsPayoutEmail: email,
+        nowpaymentsPayoutPasswordEnc: enc,
+        nowpaymentsPayoutUpdatedAt: new Date(),
+        nowpaymentsPayoutUpdatedById: input.userId,
+      },
+      update: {
+        nowpaymentsPayoutEmail: email,
+        nowpaymentsPayoutPasswordEnc: enc,
+        nowpaymentsPayoutUpdatedAt: new Date(),
+        nowpaymentsPayoutUpdatedById: input.userId,
+      },
+    });
+    this.invalidatePayoutCredsCache();
+    return this.getPayoutConfigStatus();
+  }
+
+  private cryptoSecret() {
+    return resolveJwtSecret(this.config.get<string>('JWT_SECRET'));
   }
 
   /**
@@ -92,7 +170,7 @@ export class NowPaymentsService {
     return '';
   }
 
-  private payoutEmail(): string {
+  private envPayoutEmail(): string {
     return this.envValue(
       'NOWPAYMENTS_PAYOUT_EMAIL',
       'NOW_PAYMENTS_PAYOUT_EMAIL',
@@ -102,7 +180,7 @@ export class NowPaymentsService {
     );
   }
 
-  private payoutPassword(): string {
+  private envPayoutPassword(): string {
     return this.envValue(
       'NOWPAYMENTS_PAYOUT_PASSWORD',
       'NOW_PAYMENTS_PAYOUT_PASSWORD',
@@ -110,6 +188,47 @@ export class NowPaymentsService {
       'NOWPAYMENTS_LOGIN_PASSWORD',
       'NOWPAYMENTS_ACCOUNT_PASSWORD',
     );
+  }
+
+  private async resolvePayoutCreds(): Promise<{
+    email: string;
+    password: string;
+  }> {
+    if (this.credsCache && Date.now() - this.credsCache.at < 15_000) {
+      return this.credsCache;
+    }
+    let email = this.envPayoutEmail();
+    let password = this.envPayoutPassword();
+    if (isSoloApp()) {
+      try {
+        const row = await this.prisma.platformConfig.findUnique({
+          where: { id: 'default' },
+          select: {
+            nowpaymentsPayoutEmail: true,
+            nowpaymentsPayoutPasswordEnc: true,
+          },
+        });
+        const dbEmail = row?.nowpaymentsPayoutEmail?.trim();
+        if (dbEmail) email = dbEmail;
+        if (row?.nowpaymentsPayoutPasswordEnc) {
+          try {
+            password = decryptCredential(
+              row.nowpaymentsPayoutPasswordEnc,
+              this.cryptoSecret(),
+            );
+          } catch {
+            this.logger.warn('Could not decrypt shared NOWPayments payout password');
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '';
+        if (!/nowpaymentsPayout|Unknown arg|column/i.test(msg)) {
+          this.logger.warn(`Payout creds DB read failed: ${msg}`);
+        }
+      }
+    }
+    this.credsCache = { email, password, at: Date.now() };
+    return this.credsCache;
   }
 
   private headers(extra: Record<string, string> = {}) {
@@ -355,12 +474,13 @@ export class NowPaymentsService {
       return this.payoutToken;
     }
 
-    const email = this.payoutEmail();
-    const password = this.payoutPassword();
+    const { email, password } = await this.resolvePayoutCreds();
 
     if (!email || !password) {
       throw new Error(
-        'NOWPayments payout credentials not configured — set NOWPAYMENTS_PAYOUT_EMAIL and NOWPAYMENTS_PAYOUT_PASSWORD on the API server (your NOWPayments account login), then restart',
+        isSoloApp()
+          ? 'NOWPayments payout login is not saved yet — either user can enter the email and password in Settings'
+          : 'NOWPayments payout credentials not configured — set NOWPAYMENTS_PAYOUT_EMAIL and NOWPAYMENTS_PAYOUT_PASSWORD on the API server (your NOWPayments account login), then restart',
       );
     }
 

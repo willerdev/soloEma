@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -36,6 +37,7 @@ import { FxRatesService } from '../fx/fx-rates.service';
 import { BinanceC2cService } from '../fx/binance-c2c.service';
 import { resolvePreferredDisplayCurrency } from '../fx/country-currency.util';
 import { isInvestorVipActive } from '../investor/investor-vip.util';
+import { isSoloApp } from '../common/app-variant';
 import {
   isInvestorVvipActive,
   vvipWithdrawFeeQuote,
@@ -2000,6 +2002,32 @@ export class WalletService {
       netPayout,
       balance: newBalance,
     };
+  }
+
+  async getNowpaymentsPayoutLogin() {
+    if (!isSoloApp()) {
+      throw new ForbiddenException(
+        'Shared payout login is only available on soloEmma.',
+      );
+    }
+    return this.nowPayments.getPayoutConfigStatus();
+  }
+
+  async saveNowpaymentsPayoutLogin(
+    userId: string,
+    email: string,
+    password: string,
+  ) {
+    if (!isSoloApp()) {
+      throw new ForbiddenException(
+        'Shared payout login is only available on soloEmma.',
+      );
+    }
+    return this.nowPayments.saveSharedPayoutLogin({
+      email,
+      password,
+      userId,
+    });
   }
 
   async getAutoWithdrawSettings(userId: string) {

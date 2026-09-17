@@ -11,6 +11,7 @@ import {
 import { PayoutSource, WalletTxType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NowPaymentsService } from '../payments/nowpayments.service';
+import { isSoloApp } from '../common/app-variant';
 import { ConfigService } from '@nestjs/config';
 import { ComplianceService } from '../compliance/compliance.service';
 import { NotificationService } from '../email/notification.service';
@@ -488,16 +489,26 @@ export class PayoutService {
       );
     }
 
-    if (!this.nowPayments.isPayoutConfigured) {
-      const status = this.nowPayments.getPayoutConfigStatus();
+    if (!(await this.nowPayments.isPayoutReady())) {
+      const status = await this.nowPayments.getPayoutConfigStatus();
       const missing = [
-        !status.payoutEmailSet ? 'NOWPAYMENTS_PAYOUT_EMAIL' : null,
-        !status.payoutPasswordSet ? 'NOWPAYMENTS_PAYOUT_PASSWORD' : null,
+        !status.payoutEmailSet ? 'payout email' : null,
+        !status.payoutPasswordSet ? 'payout password' : null,
       ].filter(Boolean);
       throw new BadRequestException(
-        `NOWPayments payout login is not configured on traders-api — set ${missing.join(
-          ' and ',
-        )} on the Render backend service (not the frontend), then Manual Deploy / restart`,
+        isSoloApp()
+          ? `NOWPayments payout login is not configured — save ${missing.join(
+              ' and ',
+            )} in Settings (shared for both users)`
+          : `NOWPayments payout login is not configured on traders-api — set ${missing
+              .map((m) =>
+                m === 'payout email'
+                  ? 'NOWPAYMENTS_PAYOUT_EMAIL'
+                  : 'NOWPAYMENTS_PAYOUT_PASSWORD',
+              )
+              .join(
+                ' and ',
+              )} on the Render backend service (not the frontend), then Manual Deploy / restart`,
       );
     }
 

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import { AuthLoadingScreen, useRequireAuth } from "@/hooks/use-require-auth";
 import { WalletAutoWithdrawSettings } from "@/components/wallet/wallet-auto-withdraw-settings";
+import { NowpaymentsPayoutLoginCard } from "@/components/wallet/nowpayments-payout-login-card";
 import { api, type WalletSummary } from "@/lib/api";
 import { ArrowLeft, Clock, Loader2 } from "lucide-react";
 
@@ -73,11 +74,14 @@ export default function AutoWithdrawPage() {
           <Loader2 className="h-6 w-6 animate-spin text-primary" />
         </div>
       ) : (
+        <>
+        <NowpaymentsPayoutLoginCard />
         <WalletAutoWithdrawSettings
           eligible={eligible}
           availableBalance={summary?.availableBalance}
           onUpdated={() => void refresh()}
         />
+        </>
       )}
     </div>
   );

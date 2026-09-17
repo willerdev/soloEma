@@ -1192,6 +1192,12 @@ model PlatformConfig {
   derivEnabled          Boolean @default(false)
   derivNotes            String? @db.Text
 
+  /// Shared NOWPayments payout login (Solo: either user can set; used for all withdrawals).
+  nowpaymentsPayoutEmail         String?
+  nowpaymentsPayoutPasswordEnc   String?
+  nowpaymentsPayoutUpdatedAt     DateTime?
+  nowpaymentsPayoutUpdatedById   String?
+
   /// Launch / vault contract config (Remix deploy) — preferred over env when set.
   contractAddress      String?
   contractChainId      Int?

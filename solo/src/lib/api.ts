@@ -1358,6 +1358,27 @@ class ApiClient {
         method: "POST",
         body: JSON.stringify({ year, month }),
       }),
+    nowpaymentsPayoutLogin: () =>
+      this.request<{
+        apiKeySet: boolean;
+        payoutEmailSet: boolean;
+        payoutEmailMasked: string | null;
+        payoutPasswordSet: boolean;
+        payoutConfigured: boolean;
+        shared?: boolean;
+      }>("/wallet/nowpayments-payout"),
+    saveNowpaymentsPayoutLogin: (data: { email: string; password: string }) =>
+      this.request<{
+        apiKeySet: boolean;
+        payoutEmailSet: boolean;
+        payoutEmailMasked: string | null;
+        payoutPasswordSet: boolean;
+        payoutConfigured: boolean;
+        shared?: boolean;
+      }>("/wallet/nowpayments-payout", {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
     autoWithdrawSettings: () =>
       this.request<AutoWithdrawSettings>("/wallet/auto-withdraw"),
     updateAutoWithdrawSettings: (data: {

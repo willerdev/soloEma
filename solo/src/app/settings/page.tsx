@@ -14,6 +14,7 @@ import { useThemeStore } from "@/stores/theme";
 import { api } from "@/lib/api";
 import { MetaApiTokenCard } from "@/components/mt5/metaapi-token-card";
 import { MetaApiAccountPicker } from "@/components/mt5/metaapi-account-picker";
+import { NowpaymentsPayoutLoginCard } from "@/components/wallet/nowpayments-payout-login-card";
 
 export default function SettingsPage() {
   const { ready } = useRequireAuth();
@@ -81,7 +82,7 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-2xl font-bold text-white">Settings</h1>
         <p className="mt-1 text-sm text-gray-400">
-          Account, MetaAPI, and Deriv
+          Account, MetaAPI, Deriv, and shared NOWPayments payout login
         </p>
       </div>
 
@@ -112,6 +113,8 @@ export default function SettingsPage() {
 
       <MetaApiTokenCard onChanged={setMetaOk} />
       {metaOk && <MetaApiAccountPicker enabled={metaOk} />}
+
+      <NowpaymentsPayoutLoginCard />
 
       <Card>
         <CardHeader>

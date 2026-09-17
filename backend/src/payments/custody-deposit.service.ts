@@ -49,7 +49,7 @@ export class CustodyDepositService {
       };
     }
 
-    const payoutStatus = this.nowPayments.getPayoutConfigStatus();
+    const payoutStatus = await this.nowPayments.getPayoutConfigStatus();
     const missing: string[] = [];
     if (!payoutStatus.payoutEmailSet) missing.push('NOWPAYMENTS_PAYOUT_EMAIL');
     if (!payoutStatus.payoutPasswordSet) {
