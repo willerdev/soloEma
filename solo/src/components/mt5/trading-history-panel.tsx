@@ -9,6 +9,7 @@ type Props = {
   items: UserMt5HistoryItem[];
   loading: boolean;
   error: string | null;
+  dealCount?: number;
 };
 
 function formatWhen(iso: string) {
@@ -22,7 +23,12 @@ function formatWhen(iso: string) {
   });
 }
 
-export function TradingHistoryPanel({ items, loading, error }: Props) {
+export function TradingHistoryPanel({
+  items,
+  loading,
+  error,
+  dealCount = 0,
+}: Props) {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
@@ -36,8 +42,9 @@ export function TradingHistoryPanel({ items, loading, error }: Props) {
       {error && <p className="text-xs text-danger">{error}</p>}
       {items.length === 0 && !loading ? (
         <p className="px-1 py-8 text-center text-xs text-muted">
-          No closed trades yet. History fills from MetaAPI when a trade is
-          closed.
+          {dealCount > 0
+            ? "MetaAPI sent deal history, but none of those tickets are closed trades yet."
+            : "No closed trades from MetaAPI yet. History loads from the account deal list (not from open positions)."}
         </p>
       ) : (
         <ul className="space-y-1.5">

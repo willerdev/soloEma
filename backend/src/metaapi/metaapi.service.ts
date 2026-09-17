@@ -1114,7 +1114,7 @@ export class MetaApiService {
     return {
       id: String(raw.id ?? ''),
       type: String(raw.type ?? ''),
-      entry: String(raw.entry ?? ''),
+      entry: String(raw.entryType ?? raw.entry ?? ''),
       time: String(raw.time ?? raw.brokerTime ?? ''),
       symbol: String(raw.symbol ?? ''),
       volume: Number(raw.volume ?? 0),
@@ -1122,71 +1122,186 @@ export class MetaApiService {
       profit: Number(raw.profit ?? 0),
       commission: Number(raw.commission ?? 0),
       swap: Number(raw.swap ?? 0),
-      positionId: String(raw.positionId ?? raw.id ?? ''),
+      positionId: String(raw.positionId ?? raw.orderId ?? raw.id ?? ''),
       orderId: raw.orderId != null ? String(raw.orderId) : undefined,
     };
+  }
+
+  private parseDealRows(body: unknown): unknown[] {
+    if (Array.isArray(body)) return body;
+    if (body && typeof body === 'object') {
+      const row = body as Record<string, unknown>;
+      if (Array.isArray(row.deals)) return row.deals;
+      if (Array.isArray(row.items)) return row.items;
+    }
+    return [];
   }
 
   async getHistoryDeals(
     account: MetaApiAccount,
     opts?: { days?: number; fresh?: boolean },
   ): Promise<MetaApiDeal[]> {
-    const days = Math.min(Math.max(opts?.days ?? 60, 1), 120);
+    const days = Math.min(Math.max(opts?.days ?? 90, 1), 120);
     const key = this.snapshotCacheKey('history', account.id);
     if (opts?.fresh) {
       this.terminalSnapshotCache.delete(key);
+    } else {
+      const hit = this.terminalSnapshotCache.get(key);
+      if (hit && hit.expiresAt > Date.now()) {
+        return hit.value as MetaApiDeal[];
+      }
     }
-    return this.cachedSnapshot(key, opts?.fresh ? 0 : 20_000, () =>
-      this.fetchHistoryDeals(account, days),
-    );
+    const deals = await this.fetchHistoryDeals(account, days);
+    if (deals.length > 0) {
+      this.terminalSnapshotCache.set(key, {
+        value: deals,
+        expiresAt: Date.now() + (opts?.fresh ? 8_000 : 45_000),
+      });
+    } else {
+      this.terminalSnapshotCache.delete(key);
+    }
+    return deals;
   }
 
+  /**
+   * MetaAPI REST: GET /history-deals/time/:startTime/:endTime
+   * start inclusive, end exclusive. Deal PnL is on MetatraderDeal.profit
+   * (plus swap/commission); close flag is entryType, not `entry`.
+   */
   private async fetchHistoryDeals(
     account: MetaApiAccount,
     days: number,
   ): Promise<MetaApiDeal[]> {
-    const end = new Date();
+    const end = new Date(Date.now() + 120_000);
     const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
     const startIso = start.toISOString();
     const endIso = end.toISOString();
-    const base = this.clientUrl(account.region);
-    const headers = {
-      Accept: 'application/json',
-      'auth-token': this.activeToken(),
-    };
-    const deals: MetaApiDeal[] = [];
     const pageSize = 1000;
-    for (let offset = 0; offset < 4000; offset += pageSize) {
-      const url =
-        `${base}/users/current/accounts/${encodeURIComponent(account.id)}` +
-        `/history-deals/time/${startIso}/${endIso}` +
-        `?offset=${offset}&limit=${pageSize}`;
-      const res = await fetch(url, { headers });
-      const body = (await res.json().catch(() => ({}))) as unknown;
+    const deals: MetaApiDeal[] = [];
+    let lastError = '';
 
+    for (const encoded of [false, true]) {
+      deals.length = 0;
+      lastError = '';
+      let pageFailed = false;
+      for (let offset = 0; offset < 4000; offset += pageSize) {
+        const page = await this.fetchHistoryDealsPage(
+          account,
+          startIso,
+          endIso,
+          offset,
+          pageSize,
+          encoded,
+        );
+        if (!page.ok) {
+          lastError = page.error;
+          this.logger.warn(
+            `History deals GET ${page.status} encoded=${encoded}: ${page.error}`,
+          );
+          pageFailed = true;
+          break;
+        }
+        for (const row of page.rows) {
+          deals.push(this.mapDeal(row as Record<string, unknown>));
+        }
+        if (page.rows.length < pageSize) break;
+      }
+      if (!pageFailed) {
+        this.logger.log(
+          `History deals GET encoded=${encoded} count=${deals.length} account=${account.id}`,
+        );
+        if (deals.length > 0) return deals;
+        break;
+      }
+    }
+
+    const rpc = await this.fetchHistoryDealsRpc(account, startIso, endIso);
+    if (rpc.length > 0) {
+      this.logger.log(
+        `History deals RPC count=${rpc.length} account=${account.id}`,
+      );
+      return rpc;
+    }
+
+    if (lastError) {
+      this.raiseBrokerError(
+        lastError,
+        'trade history read',
+        'Could not read trade history right now. Please try again in a few minutes.',
+      );
+    }
+    return deals;
+  }
+
+  private async fetchHistoryDealsPage(
+    account: MetaApiAccount,
+    startIso: string,
+    endIso: string,
+    offset: number,
+    limit: number,
+    encoded: boolean,
+  ): Promise<{ ok: boolean; status: number; rows: unknown[]; error: string }> {
+    const startSeg = encoded ? encodeURIComponent(startIso) : startIso;
+    const endSeg = encoded ? encodeURIComponent(endIso) : endIso;
+    const url =
+      `${this.clientUrl(account.region)}/users/current/accounts/${encodeURIComponent(account.id)}` +
+      `/history-deals/time/${startSeg}/${endSeg}?offset=${offset}&limit=${limit}`;
+    const res = await fetch(url, { headers: this.headers() });
+    const body = (await res.json().catch(() => ({}))) as unknown;
+    if (!res.ok) {
+      const err = body as Record<string, unknown>;
+      return {
+        ok: false,
+        status: res.status,
+        rows: [],
+        error: String(err.message ?? `status ${res.status}`),
+      };
+    }
+    return {
+      ok: true,
+      status: res.status,
+      rows: this.parseDealRows(body),
+      error: '',
+    };
+  }
+
+  private async fetchHistoryDealsRpc(
+    account: MetaApiAccount,
+    startIso: string,
+    endIso: string,
+  ): Promise<MetaApiDeal[]> {
+    const url =
+      `${this.clientUrl(account.region)}/users/current/accounts/` +
+      `${encodeURIComponent(account.id)}/rpc`;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: this.headers(true),
+        body: JSON.stringify({
+          type: 'getDealsByTimeRange',
+          startTime: startIso,
+          endTime: endIso,
+          offset: 0,
+          limit: 1000,
+        }),
+      });
+      const body = (await res.json().catch(() => ({}))) as unknown;
       if (!res.ok) {
         const err = body as Record<string, unknown>;
         this.logger.warn(
-          `History deals failed (${res.status}): ${String(err.message ?? res.status)}`,
+          `History deals RPC ${res.status}: ${String(err.message ?? res.status)}`,
         );
-        this.raiseBrokerError(
-          String(err.message ?? `status ${res.status}`),
-          'trade history read',
-          'Could not read trade history right now. Please try again in a few minutes.',
-        );
+        return [];
       }
-
-      const rows = Array.isArray(body)
-        ? body
-        : Array.isArray((body as { deals?: unknown }).deals)
-          ? ((body as { deals: unknown[] }).deals)
-          : [];
-      for (const row of rows) {
-        deals.push(this.mapDeal(row as Record<string, unknown>));
-      }
-      if (rows.length < pageSize) break;
+      return this.parseDealRows(body).map((row) =>
+        this.mapDeal(row as Record<string, unknown>),
+      );
+    } catch (err) {
+      this.logger.warn(
+        `History deals RPC failed: ${err instanceof Error ? err.message : 'unknown'}`,
+      );
+      return [];
     }
-    return deals;
   }
 
   /** Pending limit/stop orders on the platform account for this trader. */

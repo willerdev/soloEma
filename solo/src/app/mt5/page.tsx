@@ -116,6 +116,7 @@ export default function SoloMt5Page() {
     error: historyError,
     load: loadHistory,
     dayPnl,
+    dealCount: historyDealCount,
   } = useMt5History(userId, linked);
 
   const lastAlertPrice = useMemo(() => {
@@ -168,6 +169,7 @@ export default function SoloMt5Page() {
                 seeLiveData();
                 void load({ background: true });
                 void loadRunning();
+                void loadHistory({ fresh: false });
               }}
               className="inline-flex items-center gap-1.5 rounded-full bg-success px-4 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-success/90"
             >
@@ -360,6 +362,7 @@ export default function SoloMt5Page() {
                   items={historyItems}
                   loading={historyLoading}
                   error={historyError}
+                  dealCount={historyDealCount}
                 />
               )}
             </div>

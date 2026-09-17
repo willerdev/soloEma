@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, type UserMt5HistoryItem } from "@/lib/api";
 import {
   readMt5HistoryCache,
@@ -10,15 +10,11 @@ import { useMetaApiLive } from "@/hooks/use-metaapi-live";
 
 const POLL_MS = 45_000;
 
-function startOfLocalDay() {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
 export function useMt5History(userId: string | undefined, linked: boolean) {
   const { live } = useMetaApiLive();
   const [items, setItems] = useState<UserMt5HistoryItem[]>([]);
+  const [dayPnl, setDayPnl] = useState(0);
+  const [dealCount, setDealCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -35,9 +31,18 @@ export function useMt5History(userId: string | undefined, linked: boolean) {
       setError(null);
       try {
         const res = await api.signals.mt5History(opts?.fresh);
+        setDealCount(res.dealCount ?? res.items.length);
+        if (typeof res.dayPnl === "number") setDayPnl(res.dayPnl);
         if (res.message && res.items.length === 0) {
           setError(res.message);
           return;
+        }
+        if (res.items.length === 0) {
+          const cached = readMt5HistoryCache(userId);
+          if (cached && cached.items.length > 0 && !opts?.fresh) {
+            setItems(cached.items);
+            return;
+          }
         }
         setItems(res.items);
         writeMt5HistoryCache(userId, res.items);
@@ -53,20 +58,12 @@ export function useMt5History(userId: string | undefined, linked: boolean) {
   );
 
   useEffect(() => {
-    if (!linked || !userId || !live) return;
+    if (!linked || !userId) return;
     void load({ fresh: false });
+    if (!live) return;
     const id = window.setInterval(() => void load({ fresh: false }), POLL_MS);
     return () => window.clearInterval(id);
   }, [linked, userId, live, load]);
 
-  const dayPnl = useMemo(() => {
-    const start = startOfLocalDay();
-    return items.reduce((sum, row) => {
-      const closed = new Date(row.closedAt).getTime();
-      if (!Number.isFinite(closed) || closed < start) return sum;
-      return sum + (row.pnl ?? 0);
-    }, 0);
-  }, [items]);
-
-  return { items, loading, error, load, dayPnl };
+  return { items, loading, error, load, dayPnl, dealCount };
 }

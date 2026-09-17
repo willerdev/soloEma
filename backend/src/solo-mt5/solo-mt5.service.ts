@@ -779,6 +779,7 @@ export class SoloMt5Service {
       return {
         items: [],
         count: 0,
+        dealCount: 0,
         dayPnl: 0,
         refreshedAt: new Date().toISOString(),
       };
@@ -786,7 +787,7 @@ export class SoloMt5Service {
     let deals: MetaApiDeal[] = [];
     try {
       deals = await this.metaApi.getHistoryDeals(ctx.account, {
-        days: 60,
+        days: 90,
         fresh,
       });
     } catch (err) {
@@ -796,48 +797,71 @@ export class SoloMt5Service {
       return {
         items: [],
         count: 0,
+        dealCount: 0,
         dayPnl: 0,
         refreshedAt: new Date().toISOString(),
         message: err instanceof Error ? err.message : 'Could not load history',
       };
     }
-    const items = this.mapClosedDeals(deals).slice(0, 120);
+    const items = this.mapClosedDeals(deals).slice(0, 200);
+    this.logger.log(
+      `Solo MT5 history deals=${deals.length} closed=${items.length}`,
+    );
     return {
       items,
       count: items.length,
-      dayPnl: this.sumDayPnl(items),
+      dealCount: deals.length,
+      dayPnl: this.sumDealDayPnl(deals),
       refreshedAt: new Date().toISOString(),
     };
   }
 
-  private sumDayPnl(items: Array<{ pnl: number | null; closedAt: string }>) {
+  private sumDealDayPnl(deals: MetaApiDeal[]) {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
     const startMs = start.getTime();
-    return items.reduce((sum, row) => {
-      const closed = new Date(row.closedAt).getTime();
-      if (!Number.isFinite(closed) || closed < startMs) return sum;
-      return sum + (row.pnl ?? 0);
+    return deals.reduce((sum, deal) => {
+      if (!this.isTradeDeal(deal.type)) return sum;
+      const at = new Date(deal.time).getTime();
+      if (!Number.isFinite(at) || at < startMs) return sum;
+      return sum + deal.profit + deal.swap + deal.commission;
     }, 0);
   }
 
-  private isEntryIn(entry: string) {
-    const e = entry.toUpperCase();
-    return e === 'IN' || e.includes('ENTRY_IN') || (e.includes('IN') && !e.includes('OUT'));
+  private isTradeDeal(type: string) {
+    const t = type.toUpperCase();
+    if (
+      t.includes('BALANCE') ||
+      t.includes('CREDIT') ||
+      t.includes('BONUS') ||
+      t.includes('CHARGE') ||
+      t.includes('CORRECTION') ||
+      t.includes('COMMISSION') ||
+      t.includes('INTEREST') ||
+      t.includes('DIVIDEND') ||
+      t.includes('TAX') ||
+      t.includes('CANCELED') ||
+      t.includes('CANCELLED')
+    ) {
+      return false;
+    }
+    return t.includes('BUY') || t.includes('SELL') || t.length === 0;
   }
 
   private isEntryOut(entry: string) {
     const e = entry.toUpperCase();
-    return e === 'OUT' || e.includes('ENTRY_OUT') || e.includes('OUT');
+    return e.includes('OUT');
+  }
+
+  private isEntryInOnly(entry: string) {
+    const e = entry.toUpperCase();
+    return e.includes('IN') && !e.includes('OUT');
   }
 
   private mapClosedDeals(deals: MetaApiDeal[]) {
     const groups = new Map<string, MetaApiDeal[]>();
     for (const deal of deals) {
-      const type = deal.type.toUpperCase();
-      if (type.includes('BALANCE') || type.includes('CREDIT')) {
-        continue;
-      }
+      if (!this.isTradeDeal(deal.type)) continue;
       const key = deal.positionId || deal.id;
       const list = groups.get(key) ?? [];
       list.push(deal);
@@ -866,67 +890,46 @@ export class SoloMt5Service {
       group.sort(
         (a, b) => new Date(a.time).getTime() - new Date(b.time).getTime(),
       );
-      const inn = group.find((d) => this.isEntryIn(d.entry)) ?? group[0];
+      const inn =
+        group.find((d) => this.isEntryInOnly(d.entry)) ?? group[0];
       const outs = group.filter((d) => this.isEntryOut(d.entry));
-      const closeDeals = outs.length > 0 ? outs : group.slice(-1);
-      const last = closeDeals[closeDeals.length - 1];
-      if (!last) continue;
-      if (!this.isEntryOut(last.entry) && last.profit === 0 && group.length < 2) {
-        continue;
-      }
       const pnl = group.reduce(
         (sum, d) => sum + d.profit + d.swap + d.commission,
         0,
       );
-      const direction = this.isEntryIn(inn.entry)
+      const stillOpen =
+        outs.length === 0 &&
+        group.length === 1 &&
+        Math.abs(pnl) < 1e-8 &&
+        !this.isEntryOut(group[0].entry);
+      if (stillOpen) continue;
+
+      const closeDeal = outs[outs.length - 1] ?? group[group.length - 1];
+      if (!closeDeal) continue;
+      const direction = this.isEntryInOnly(inn.entry)
         ? isSellType(inn.type)
           ? 'SELL'
           : 'BUY'
-        : isSellType(last.type)
+        : isSellType(closeDeal.type)
           ? 'BUY'
           : 'SELL';
-      const status = pnl > 0 ? 'WON' : pnl < 0 ? 'LOST' : 'ARCHIVED';
       items.push({
-        id: last.id || positionId,
+        id: closeDeal.id || positionId,
         signalId: positionId,
-        symbol: last.symbol || inn.symbol,
+        symbol: closeDeal.symbol || inn.symbol,
         direction,
-        status,
+        status: pnl > 0 ? 'WON' : pnl < 0 ? 'LOST' : 'ARCHIVED',
         entryMin: inn.price,
         entryMax: inn.price,
         stopLoss: 0,
         takeProfit: 0,
         entryPrice: inn.price || null,
-        exitPrice: last.price,
+        exitPrice: closeDeal.price,
         pnl,
         isWin: pnl > 0 ? true : pnl < 0 ? false : null,
-        submittedAt: inn.time || last.time,
-        closedAt: last.time,
+        submittedAt: inn.time || closeDeal.time,
+        closedAt: closeDeal.time,
       });
-    }
-
-    if (items.length === 0) {
-      for (const deal of deals) {
-        if (!deal.symbol || (deal.profit === 0 && deal.swap === 0)) continue;
-        const pnl = deal.profit + deal.swap + deal.commission;
-        items.push({
-          id: deal.id,
-          signalId: deal.positionId || deal.id,
-          symbol: deal.symbol,
-          direction: isSellType(deal.type) ? 'SELL' : 'BUY',
-          status: pnl > 0 ? 'WON' : pnl < 0 ? 'LOST' : 'ARCHIVED',
-          entryMin: deal.price,
-          entryMax: deal.price,
-          stopLoss: 0,
-          takeProfit: 0,
-          entryPrice: deal.price,
-          exitPrice: deal.price,
-          pnl,
-          isWin: pnl > 0 ? true : pnl < 0 ? false : null,
-          submittedAt: deal.time,
-          closedAt: deal.time,
-        });
-      }
     }
 
     items.sort(

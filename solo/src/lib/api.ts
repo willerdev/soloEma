@@ -3321,6 +3321,7 @@ export interface UserMt5HistoryItem {
 export interface UserMt5HistoryResult {
   items: UserMt5HistoryItem[];
   count: number;
+  dealCount?: number;
   dayPnl?: number;
   refreshedAt: string;
   message?: string;
