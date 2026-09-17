@@ -72,8 +72,14 @@ export class SoloMt5Controller {
   getHistory(
     @Request() req: { user: { id: string } },
     @Query('fresh') fresh?: string,
+    @Query('days') days?: string,
   ) {
-    return this.mt5.history(req.user.id, fresh === '1' || fresh === 'true');
+    const parsed = days ? Number.parseInt(days, 10) : 2;
+    return this.mt5.history(
+      req.user.id,
+      fresh === '1' || fresh === 'true',
+      Number.isFinite(parsed) ? parsed : 2,
+    );
   }
 
   @Get('mt5/terminal')

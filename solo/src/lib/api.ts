@@ -350,6 +350,23 @@ class ApiClient {
       this.request<Record<string, unknown>>(`/deriv/contracts/${id}/sell`, {
         method: "POST",
       }),
+    cryptoWallets: () =>
+      this.request<DerivCryptoWalletsResult>("/deriv/crypto-wallets"),
+    saveCryptoWallet: (data: {
+      purpose: "DEPOSIT" | "WITHDRAW";
+      network: string;
+      address: string;
+      label?: string;
+    }) =>
+      this.request<DerivCryptoWalletsResult>("/deriv/crypto-wallets", {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
+    deleteCryptoWallet: (purpose: "DEPOSIT" | "WITHDRAW") =>
+      this.request<DerivCryptoWalletsResult>(
+        `/deriv/crypto-wallets/${purpose}`,
+        { method: "DELETE" },
+      ),
   };
 
   metaApi = {
@@ -650,9 +667,14 @@ class ApiClient {
     },
     mt5Running: () =>
       this.request<UserMt5RunningResult>("/signals/mt5/running"),
-    mt5History: (fresh?: boolean) => {
-      const q = fresh ? "?fresh=1" : "";
-      return this.request<UserMt5HistoryResult>(`/signals/mt5/history${q}`);
+    mt5History: (fresh?: boolean, days?: number) => {
+      const q = new URLSearchParams();
+      if (fresh) q.set("fresh", "1");
+      if (days != null) q.set("days", String(days));
+      const qs = q.toString();
+      return this.request<UserMt5HistoryResult>(
+        `/signals/mt5/history${qs ? `?${qs}` : ""}`,
+      );
     },
     closeMt5Position: (positionId: string) =>
       this.request<{ ok: boolean; positionId: string; status?: string }>(
@@ -1806,6 +1828,21 @@ export interface DerivAccount {
   accountType: string | null;
   currency: string;
   balance: number;
+}
+
+export interface DerivCryptoWallet {
+  id: string;
+  purpose: "DEPOSIT" | "WITHDRAW" | string;
+  network: string;
+  address: string;
+  label: string | null;
+  updatedAt: string;
+}
+
+export interface DerivCryptoWalletsResult {
+  deposit: DerivCryptoWallet | null;
+  withdraw: DerivCryptoWallet | null;
+  saved?: DerivCryptoWallet;
 }
 
 export interface PayoutRecord {

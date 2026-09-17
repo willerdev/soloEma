@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { api, type WalletLedgerItem, type WalletSummary } from "@/lib/api";
@@ -112,8 +113,15 @@ export default function WalletPage() {
         <div>
           <h1 className="text-2xl font-bold text-white">Wallet</h1>
           <p className="mt-1 text-sm text-gray-400">
-            Balance and earnings — USDT ledger with optional local display
+            Balance and earnings — USDT ledger with optional local display.
+            Daily auto-withdraw here is the platform wallet, not Deriv.
           </p>
+          <Link
+            href="/journal"
+            className="mt-2 inline-block text-xs font-semibold text-primary hover:underline"
+          >
+            Open full journal
+          </Link>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <CurrencySwitcher

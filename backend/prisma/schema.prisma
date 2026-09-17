@@ -391,6 +391,7 @@ model User {
   loginOtps                    LoginOtp[]
   passwordResets               PasswordReset[]
   savedWithdrawalWallets       SavedWithdrawalWallet[]
+  derivCryptoWallets           DerivCryptoWallet[]
   withdrawalWalletOtps         WithdrawalWalletOtp[]
   withdrawOtps                 WithdrawOtp[]
   walletTransferOtps           WalletTransferOtp[]
@@ -569,6 +570,24 @@ model SavedWithdrawalWallet {
   @@unique([userId, address, network])
   @@index([userId])
   @@map("saved_withdrawal_wallets")
+}
+
+/// Crypto addresses for Deriv deposits / cashouts — not the platform USDT wallet.
+model DerivCryptoWallet {
+  id        String   @id @default(cuid())
+  userId    String
+  purpose   String
+  network   String
+  address   String
+  label     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, purpose])
+  @@index([userId])
+  @@map("deriv_crypto_wallets")
 }
 
 model PasswordReset {

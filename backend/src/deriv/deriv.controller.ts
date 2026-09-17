@@ -12,7 +12,7 @@ import {
 import { JwtAuthGuard } from '../auth/guards';
 import { AuthRateLimitGuard } from '../auth/auth-rate-limit.guard';
 import { DerivService } from './deriv.service';
-import { DerivTransferDto, SaveDerivTokenDto } from './deriv.dto';
+import { DerivTransferDto, SaveDerivCryptoWalletDto, SaveDerivTokenDto } from './deriv.dto';
 
 @Controller('deriv')
 @UseGuards(JwtAuthGuard)
@@ -46,6 +46,28 @@ export class DerivController {
   @Get('trades')
   trades(@Request() req: { user: { id: string } }) {
     return this.deriv.trades(req.user.id);
+  }
+
+  @Get('crypto-wallets')
+  cryptoWallets(@Request() req: { user: { id: string } }) {
+    return this.deriv.cryptoWallets(req.user.id);
+  }
+
+  @Put('crypto-wallets')
+  @UseGuards(AuthRateLimitGuard)
+  saveCryptoWallet(
+    @Request() req: { user: { id: string } },
+    @Body() dto: SaveDerivCryptoWalletDto,
+  ) {
+    return this.deriv.saveCryptoWallet(req.user.id, dto);
+  }
+
+  @Delete('crypto-wallets/:purpose')
+  deleteCryptoWallet(
+    @Request() req: { user: { id: string } },
+    @Param('purpose') purpose: string,
+  ) {
+    return this.deriv.deleteCryptoWallet(req.user.id, purpose);
   }
 
   @Post('transfer')

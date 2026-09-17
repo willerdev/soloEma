@@ -27,6 +27,7 @@ import {
   Clock,
   LineChart,
   CandlestickChart,
+  BookOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth";
@@ -111,6 +112,13 @@ const NAV_GROUPS: NavGroup[] = [
         shortLabel: "Trade",
         icon: CandlestickChart,
         keywords: "mt5 chart live trades metaapi trading",
+      },
+      {
+        href: "/journal",
+        label: "Journal",
+        shortLabel: "Journal",
+        icon: BookOpen,
+        keywords: "history pnl mt5 deriv wallet calendar",
       },
     ],
   },

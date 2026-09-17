@@ -61,7 +61,8 @@ export default function AutoWithdrawPage() {
             </h1>
             <p className="mt-1.5 text-sm leading-relaxed text-muted">
               Send available USDT to a saved TRC20 wallet every day at 09:00
-              Kampala time. Enable, set the amount, and pick the destination.
+              Kampala time. This is the soloEmma platform wallet. Deriv
+              cashout addresses are saved under Journal or Deriv.
             </p>
           </div>
         </div>

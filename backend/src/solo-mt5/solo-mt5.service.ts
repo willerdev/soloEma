@@ -769,11 +769,14 @@ export class SoloMt5Service {
     return { ok: true, results };
   }
 
-  async history(userId: string, fresh = false) {
-    return this.withCloud(userId, () => this.loadHistory(userId, fresh));
+  async history(userId: string, fresh = false, days = 2) {
+    const window = Math.min(Math.max(days, 1), 120);
+    return this.withCloud(userId, () =>
+      this.loadHistory(userId, fresh, window),
+    );
   }
 
-  private async loadHistory(userId: string, fresh: boolean) {
+  private async loadHistory(userId: string, fresh: boolean, days: number) {
     const ctx = await this.readyAccountOrNull(userId);
     if (!ctx) {
       return {
@@ -787,7 +790,7 @@ export class SoloMt5Service {
     let deals: MetaApiDeal[] = [];
     try {
       deals = await this.metaApi.getHistoryDeals(ctx.account, {
-        days: 2,
+        days,
         fresh,
       });
     } catch (err) {

@@ -113,7 +113,7 @@ function localSummary(
   };
 }
 
-export function DailyIncomeJournal() {
+export function DailyIncomeJournal({ hideTitle = false }: { hideTitle?: boolean }) {
   const now = new Date();
   const [year, setYear] = useState(now.getUTCFullYear());
   const [month, setMonth] = useState(now.getUTCMonth() + 1);
@@ -175,12 +175,22 @@ export function DailyIncomeJournal() {
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      {!hideTitle && (
         <div>
           <h1 className="text-2xl font-bold text-white">Journal</h1>
           <p className="mt-1 text-sm text-gray-400">
             Your wallet activity by day — earnings, allocations, and withdrawals.
           </p>
         </div>
+      )}
+      {hideTitle && (
+        <div>
+          <h2 className="text-lg font-semibold text-white">Platform wallet calendar</h2>
+          <p className="mt-1 text-sm text-muted">
+            soloEmma USDT ledger only — not Deriv and not MT5.
+          </p>
+        </div>
+      )}
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-white/[0.03] p-1">
             <button

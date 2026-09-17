@@ -15,6 +15,7 @@ import {
 } from '../common/credential-crypto.util';
 import { DerivPatClient } from './deriv-pat.client';
 import { DerivWsClient } from './deriv-ws.client';
+import { SaveDerivCryptoWalletDto } from './deriv.dto';
 
 const transferBuckets = new Map<string, { count: number; resetAt: number }>();
 const UUID_RE =
@@ -152,6 +153,82 @@ export class DerivService {
       data: { derivApiTokenEnc: null, derivConnectedAt: null },
     });
     return { connected: false };
+  }
+
+  private mapCryptoWallet(row: {
+    id: string;
+    purpose: string;
+    network: string;
+    address: string;
+    label: string | null;
+    updatedAt: Date;
+  }) {
+    return {
+      id: row.id,
+      purpose: row.purpose,
+      network: row.network,
+      address: row.address,
+      label: row.label,
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
+
+  async cryptoWallets(userId: string) {
+    try {
+      const rows = await this.prisma.derivCryptoWallet.findMany({
+        where: { userId },
+      });
+      const deposit = rows.find((r) => r.purpose === 'DEPOSIT') ?? null;
+      const withdraw = rows.find((r) => r.purpose === 'WITHDRAW') ?? null;
+      return {
+        deposit: deposit ? this.mapCryptoWallet(deposit) : null,
+        withdraw: withdraw ? this.mapCryptoWallet(withdraw) : null,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (/derivCryptoWallet|deriv_crypto_wallets|Unknown arg/i.test(msg)) {
+        return { deposit: null, withdraw: null };
+      }
+      throw err;
+    }
+  }
+
+  async saveCryptoWallet(userId: string, dto: SaveDerivCryptoWalletDto) {
+    const purpose = dto.purpose;
+    const network = dto.network.trim().toUpperCase();
+    const address = dto.address.trim();
+    const label = dto.label?.trim() || null;
+    if (address.length < 8) {
+      throw new BadRequestException('That wallet address looks too short.');
+    }
+    try {
+      const row = await this.prisma.derivCryptoWallet.upsert({
+        where: { userId_purpose: { userId, purpose } },
+        create: { userId, purpose, network, address, label },
+        update: { network, address, label },
+      });
+      const all = await this.cryptoWallets(userId);
+      return { ...all, saved: this.mapCryptoWallet(row) };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not save address';
+      if (/derivCryptoWallet|deriv_crypto_wallets|Unknown arg/i.test(msg)) {
+        throw new BadRequestException(
+          'Database is missing Deriv wallet columns. Redeploy solo-api so prisma db push runs.',
+        );
+      }
+      throw new BadRequestException(msg);
+    }
+  }
+
+  async deleteCryptoWallet(userId: string, purposeRaw: string) {
+    const purpose = purposeRaw.trim().toUpperCase();
+    if (purpose !== 'DEPOSIT' && purpose !== 'WITHDRAW') {
+      throw new BadRequestException('Purpose must be DEPOSIT or WITHDRAW.');
+    }
+    await this.prisma.derivCryptoWallet.deleteMany({
+      where: { userId, purpose },
+    });
+    return this.cryptoWallets(userId);
   }
 
   async accounts(userId: string) {

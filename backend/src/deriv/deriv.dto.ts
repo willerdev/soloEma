@@ -1,4 +1,12 @@
-import { IsNotEmpty, IsNumber, IsString, MaxLength, Min } from 'class-validator';
+import {
+  IsIn,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+  MaxLength,
+  Min,
+} from 'class-validator';
 
 export class SaveDerivTokenDto {
   @IsString()
@@ -26,4 +34,34 @@ export class DerivTransferDto {
   @IsNotEmpty()
   @MaxLength(12)
   currency: string;
+}
+
+const DERIV_CRYPTO_NETWORKS = [
+  'TRC20',
+  'ERC20',
+  'BEP20',
+  'BTC',
+  'ETH',
+  'LTC',
+  'USDC',
+] as const;
+
+export class SaveDerivCryptoWalletDto {
+  @IsString()
+  @IsIn(['DEPOSIT', 'WITHDRAW'])
+  purpose: 'DEPOSIT' | 'WITHDRAW';
+
+  @IsString()
+  @IsIn([...DERIV_CRYPTO_NETWORKS])
+  network: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  address: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  label?: string;
 }
