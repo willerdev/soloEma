@@ -1147,29 +1147,46 @@ export class MetaApiService {
   ): Promise<MetaApiDeal[]> {
     const end = new Date();
     const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+    const startIso = start.toISOString();
+    const endIso = end.toISOString();
     const base = this.clientUrl(account.region);
-    const url =
-      `${base}/users/current/accounts/${encodeURIComponent(account.id)}` +
-      `/history-deals/time/${encodeURIComponent(start.toISOString())}` +
-      `/${encodeURIComponent(end.toISOString())}`;
-    const res = await fetch(url, { headers: this.headers() });
-    const body = (await res.json().catch(() => ({}))) as unknown;
+    const headers = {
+      Accept: 'application/json',
+      'auth-token': this.activeToken(),
+    };
+    const deals: MetaApiDeal[] = [];
+    const pageSize = 1000;
+    for (let offset = 0; offset < 4000; offset += pageSize) {
+      const url =
+        `${base}/users/current/accounts/${encodeURIComponent(account.id)}` +
+        `/history-deals/time/${startIso}/${endIso}` +
+        `?offset=${offset}&limit=${pageSize}`;
+      const res = await fetch(url, { headers });
+      const body = (await res.json().catch(() => ({}))) as unknown;
 
-    if (!res.ok) {
-      const err = body as Record<string, unknown>;
-      this.raiseBrokerError(
-        String(err.message ?? `status ${res.status}`),
-        'trade history read',
-        'Could not read trade history right now. Please try again in a few minutes.',
-      );
+      if (!res.ok) {
+        const err = body as Record<string, unknown>;
+        this.logger.warn(
+          `History deals failed (${res.status}): ${String(err.message ?? res.status)}`,
+        );
+        this.raiseBrokerError(
+          String(err.message ?? `status ${res.status}`),
+          'trade history read',
+          'Could not read trade history right now. Please try again in a few minutes.',
+        );
+      }
+
+      const rows = Array.isArray(body)
+        ? body
+        : Array.isArray((body as { deals?: unknown }).deals)
+          ? ((body as { deals: unknown[] }).deals)
+          : [];
+      for (const row of rows) {
+        deals.push(this.mapDeal(row as Record<string, unknown>));
+      }
+      if (rows.length < pageSize) break;
     }
-
-    const rows = Array.isArray(body)
-      ? body
-      : Array.isArray((body as { deals?: unknown }).deals)
-        ? ((body as { deals: unknown[] }).deals)
-        : [];
-    return rows.map((row) => this.mapDeal(row as Record<string, unknown>));
+    return deals;
   }
 
   /** Pending limit/stop orders on the platform account for this trader. */

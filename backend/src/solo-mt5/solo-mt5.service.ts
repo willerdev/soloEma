@@ -776,62 +776,158 @@ export class SoloMt5Service {
   private async loadHistory(userId: string, fresh: boolean) {
     const ctx = await this.readyAccountOrNull(userId);
     if (!ctx) {
-      return { items: [], count: 0, refreshedAt: new Date().toISOString() };
+      return {
+        items: [],
+        count: 0,
+        dayPnl: 0,
+        refreshedAt: new Date().toISOString(),
+      };
     }
-    const deals = await this.metaApi.getHistoryDeals(ctx.account, {
-      days: 60,
-      fresh,
-    });
-    const items = this.mapClosedDeals(deals).slice(0, 80);
+    let deals: MetaApiDeal[] = [];
+    try {
+      deals = await this.metaApi.getHistoryDeals(ctx.account, {
+        days: 60,
+        fresh,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Solo MT5 history failed: ${err instanceof Error ? err.message : 'unknown'}`,
+      );
+      return {
+        items: [],
+        count: 0,
+        dayPnl: 0,
+        refreshedAt: new Date().toISOString(),
+        message: err instanceof Error ? err.message : 'Could not load history',
+      };
+    }
+    const items = this.mapClosedDeals(deals).slice(0, 120);
     return {
       items,
       count: items.length,
+      dayPnl: this.sumDayPnl(items),
       refreshedAt: new Date().toISOString(),
     };
   }
 
+  private sumDayPnl(items: Array<{ pnl: number | null; closedAt: string }>) {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const startMs = start.getTime();
+    return items.reduce((sum, row) => {
+      const closed = new Date(row.closedAt).getTime();
+      if (!Number.isFinite(closed) || closed < startMs) return sum;
+      return sum + (row.pnl ?? 0);
+    }, 0);
+  }
+
+  private isEntryIn(entry: string) {
+    const e = entry.toUpperCase();
+    return e === 'IN' || e.includes('ENTRY_IN') || (e.includes('IN') && !e.includes('OUT'));
+  }
+
+  private isEntryOut(entry: string) {
+    const e = entry.toUpperCase();
+    return e === 'OUT' || e.includes('ENTRY_OUT') || e.includes('OUT');
+  }
+
   private mapClosedDeals(deals: MetaApiDeal[]) {
-    const opens = new Map<string, MetaApiDeal>();
+    const groups = new Map<string, MetaApiDeal[]>();
     for (const deal of deals) {
-      const entry = deal.entry.toUpperCase();
-      if (entry.includes('IN') && !entry.includes('OUT')) {
-        opens.set(deal.positionId || deal.id, deal);
+      const type = deal.type.toUpperCase();
+      if (type.includes('BALANCE') || type.includes('CREDIT')) {
+        continue;
       }
+      const key = deal.positionId || deal.id;
+      const list = groups.get(key) ?? [];
+      list.push(deal);
+      groups.set(key, list);
     }
 
-    const closed = deals.filter((deal) =>
-      deal.entry.toUpperCase().includes('OUT'),
-    );
-    const items = closed.map((out) => {
-      const inn = opens.get(out.positionId);
-      const direction = inn
+    const items: Array<{
+      id: string;
+      signalId: string;
+      symbol: string;
+      direction: string;
+      status: string;
+      entryMin: number;
+      entryMax: number;
+      stopLoss: number;
+      takeProfit: number;
+      entryPrice: number | null;
+      exitPrice: number | null;
+      pnl: number | null;
+      isWin: boolean | null;
+      submittedAt: string;
+      closedAt: string;
+    }> = [];
+
+    for (const [positionId, group] of groups) {
+      group.sort(
+        (a, b) => new Date(a.time).getTime() - new Date(b.time).getTime(),
+      );
+      const inn = group.find((d) => this.isEntryIn(d.entry)) ?? group[0];
+      const outs = group.filter((d) => this.isEntryOut(d.entry));
+      const closeDeals = outs.length > 0 ? outs : group.slice(-1);
+      const last = closeDeals[closeDeals.length - 1];
+      if (!last) continue;
+      if (!this.isEntryOut(last.entry) && last.profit === 0 && group.length < 2) {
+        continue;
+      }
+      const pnl = group.reduce(
+        (sum, d) => sum + d.profit + d.swap + d.commission,
+        0,
+      );
+      const direction = this.isEntryIn(inn.entry)
         ? isSellType(inn.type)
           ? 'SELL'
           : 'BUY'
-        : isSellType(out.type)
+        : isSellType(last.type)
           ? 'BUY'
           : 'SELL';
-      const pnl = out.profit + out.swap + out.commission + (inn?.commission ?? 0);
       const status = pnl > 0 ? 'WON' : pnl < 0 ? 'LOST' : 'ARCHIVED';
-      const submittedAt = inn?.time || out.time;
-      return {
-        id: out.id || out.positionId,
-        signalId: out.positionId || out.id,
-        symbol: out.symbol || inn?.symbol || '',
+      items.push({
+        id: last.id || positionId,
+        signalId: positionId,
+        symbol: last.symbol || inn.symbol,
         direction,
         status,
-        entryMin: inn?.price ?? out.price,
-        entryMax: inn?.price ?? out.price,
+        entryMin: inn.price,
+        entryMax: inn.price,
         stopLoss: 0,
         takeProfit: 0,
-        entryPrice: inn?.price ?? null,
-        exitPrice: out.price,
+        entryPrice: inn.price || null,
+        exitPrice: last.price,
         pnl,
         isWin: pnl > 0 ? true : pnl < 0 ? false : null,
-        submittedAt,
-        closedAt: out.time,
-      };
-    });
+        submittedAt: inn.time || last.time,
+        closedAt: last.time,
+      });
+    }
+
+    if (items.length === 0) {
+      for (const deal of deals) {
+        if (!deal.symbol || (deal.profit === 0 && deal.swap === 0)) continue;
+        const pnl = deal.profit + deal.swap + deal.commission;
+        items.push({
+          id: deal.id,
+          signalId: deal.positionId || deal.id,
+          symbol: deal.symbol,
+          direction: isSellType(deal.type) ? 'SELL' : 'BUY',
+          status: pnl > 0 ? 'WON' : pnl < 0 ? 'LOST' : 'ARCHIVED',
+          entryMin: deal.price,
+          entryMax: deal.price,
+          stopLoss: 0,
+          takeProfit: 0,
+          entryPrice: deal.price,
+          exitPrice: deal.price,
+          pnl,
+          isWin: pnl > 0 ? true : pnl < 0 ? false : null,
+          submittedAt: deal.time,
+          closedAt: deal.time,
+        });
+      }
+    }
 
     items.sort(
       (a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime(),

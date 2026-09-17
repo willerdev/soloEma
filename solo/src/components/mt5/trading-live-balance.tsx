@@ -11,6 +11,7 @@ type Props = {
   live: boolean;
   linked: boolean;
   floating?: number;
+  dayPnl?: number;
 };
 
 export function TradingLiveBalance({
@@ -20,6 +21,7 @@ export function TradingLiveBalance({
   live,
   linked,
   floating = 0,
+  dayPnl = 0,
 }: Props) {
   if (!linked) return null;
 
@@ -58,6 +60,21 @@ export function TradingLiveBalance({
                 )}
               >
                 {fmtMt5Price(floating)}
+              </strong>
+            </span>
+            <span>
+              Day PnL{" "}
+              <strong
+                className={cn(
+                  "font-semibold tabular-nums",
+                  dayPnl > 0
+                    ? "text-success"
+                    : dayPnl < 0
+                      ? "text-danger"
+                      : "text-foreground",
+                )}
+              >
+                {fmtMt5Price(dayPnl)}
               </strong>
             </span>
           </div>

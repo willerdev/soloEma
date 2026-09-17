@@ -3321,7 +3321,9 @@ export interface UserMt5HistoryItem {
 export interface UserMt5HistoryResult {
   items: UserMt5HistoryItem[];
   count: number;
+  dayPnl?: number;
   refreshedAt: string;
+  message?: string;
 }
 
 export interface UserMt5QuoteItem {
