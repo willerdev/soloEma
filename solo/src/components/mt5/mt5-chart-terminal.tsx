@@ -198,13 +198,20 @@ export function Mt5ChartTerminal({
   }, [isResizingSplit]);
 
   useEffect(() => {
+    if (workspaceLayout) return;
     if (liveQuote?.mid != null) {
       checkPriceAlerts(selectedSymbol, liveQuote.mid);
     }
     for (const [sym, quote] of Object.entries(watchlistQuotes)) {
       if (quote.mid != null) checkPriceAlerts(sym, quote.mid);
     }
-  }, [liveQuote?.mid, watchlistQuotes, selectedSymbol, checkPriceAlerts]);
+  }, [
+    workspaceLayout,
+    liveQuote?.mid,
+    watchlistQuotes,
+    selectedSymbol,
+    checkPriceAlerts,
+  ]);
 
   useEffect(() => {
     if (workspaceLayout) return;

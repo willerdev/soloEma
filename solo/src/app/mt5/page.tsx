@@ -15,8 +15,12 @@ import { useAuthStore } from "@/stores/auth";
 import { useMt5Terminal } from "@/hooks/use-mt5-terminal";
 import { Mt5ChartTerminal } from "@/components/mt5/mt5-chart-terminal";
 import { TradingConnectDialog } from "@/components/mt5/trading-connect-dialog";
+import { TradingPlaceTradeCard } from "@/components/mt5/trading-place-trade-card";
+import { TradingAlertsPanel } from "@/components/mt5/trading-alerts-panel";
+import { Mt5PlaceOrderModal } from "@/components/mt5/mt5-place-order-modal";
 import { pickDefaultChartSymbol } from "@/lib/chart-market-status";
 import { useChartWatchlist } from "@/components/charts/use-chart-watchlist";
+import { usePriceAlertMonitor } from "@/hooks/use-price-alert-monitor";
 import { cn } from "@/lib/utils";
 
 type RightTab = "watchlist" | "alerts" | "plan";
@@ -29,6 +33,8 @@ export default function SoloMt5Page() {
   );
   const [connectOpen, setConnectOpen] = useState(false);
   const [rightTab, setRightTab] = useState<RightTab>("alerts");
+  const [orderModal, setOrderModal] = useState<"BUY" | "SELL" | null>(null);
+  const [lotSize, setLotSize] = useState("0.01");
   const { watchlist, addSymbol } = useChartWatchlist();
 
   const {
@@ -73,6 +79,23 @@ export default function SoloMt5Page() {
 
   const linked = Boolean(data?.account);
   const needsConnect = !linked && !loading;
+  const {
+    alerts,
+    addAlert,
+    removeAlert,
+    toasts,
+    dismissToast,
+    lastPrices,
+  } = usePriceAlertMonitor(linked);
+
+  const lastAlertPrice = useMemo(() => {
+    const live = lastPrices[chartSymbol.toUpperCase()];
+    if (live != null) return live;
+    const q = quotes.find(
+      (item) => item.symbol.toUpperCase() === chartSymbol.toUpperCase(),
+    );
+    return q?.mid ?? q?.bid ?? null;
+  }, [quotes, chartSymbol, lastPrices]);
 
   const handleCloseTrade = useCallback(
     async (trade: UserMt5Trade) => {
@@ -156,7 +179,7 @@ export default function SoloMt5Page() {
                     void loadRunning();
                   }}
                   showOrdersPanel={linked}
-                  showTradeBar={linked}
+                  showTradeBar={false}
                   workspaceLayout
                 />
               </div>
@@ -188,7 +211,22 @@ export default function SoloMt5Page() {
           </div>
         </div>
 
-        <aside className="flex min-h-0 w-full shrink-0 flex-col md:h-auto md:w-[22rem]">
+        <aside className="flex min-h-0 w-full shrink-0 flex-col gap-3 md:h-auto md:w-[22rem]">
+          <TradingPlaceTradeCard
+            linked={linked}
+            lotSize={lotSize}
+            onLotSizeChange={setLotSize}
+            onAdjustLot={(delta) => {
+              setLotSize((prev) => {
+                const next = Math.max(0.01, Number(prev) + delta);
+                if (!Number.isFinite(next)) return "0.01";
+                return next.toFixed(2);
+              });
+            }}
+            onBuy={() => setOrderModal("BUY")}
+            onSell={() => setOrderModal("SELL")}
+            onNeedConnect={() => setConnectOpen(true)}
+          />
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-surface">
             <div className="flex border-b border-border text-xs font-medium">
               {(
@@ -236,15 +274,16 @@ export default function SoloMt5Page() {
                 </ul>
               )}
               {rightTab === "alerts" && (
-                <div className="space-y-2 pt-1">
-                  {[1, 2, 3, 4, 5, 6].map((n) => (
-                    <div
-                      key={n}
-                      className="h-7 rounded-lg bg-navy/80"
-                      style={{ width: `${94 - n * 5}%` }}
-                    />
-                  ))}
-                </div>
+                <TradingAlertsPanel
+                  symbol={chartSymbol}
+                  lastPrice={lastAlertPrice}
+                  linked={linked}
+                  alerts={alerts}
+                  toasts={toasts}
+                  onAdd={addAlert}
+                  onRemove={removeAlert}
+                  onDismissToast={dismissToast}
+                />
               )}
               {rightTab === "plan" && (
                 <div className="space-y-2 pt-1">
@@ -261,6 +300,25 @@ export default function SoloMt5Page() {
           </div>
         </aside>
       </div>
+
+      {orderModal && (
+        <Mt5PlaceOrderModal
+          symbol={chartSymbol}
+          direction={orderModal}
+          volume={
+            Number.isFinite(Number(lotSize)) && Number(lotSize) >= 0.01
+              ? Number(lotSize)
+              : undefined
+          }
+          open
+          onClose={() => setOrderModal(null)}
+          onPlaced={() => {
+            setOrderModal(null);
+            void load({ background: true });
+            void loadRunning();
+          }}
+        />
+      )}
 
       <TradingConnectDialog
         open={connectOpen}
