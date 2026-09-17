@@ -1,10 +1,44 @@
 "use client";
 
 const STORAGE_KEY = "solo-metaapi-paused";
+const WATCH_KEY = "solo-metaapi-watch";
 export const METAAPI_LIVE_EVENT = "solo-metaapi-live";
 
 function canUseDom() {
   return typeof window !== "undefined" && typeof document !== "undefined";
+}
+
+let hasOpenTrades = false;
+
+function emitLiveChange() {
+  if (!canUseDom()) return;
+  window.dispatchEvent(new Event(METAAPI_LIVE_EVENT));
+}
+
+export function setMetaApiHasOpenTrades(next: boolean) {
+  if (hasOpenTrades === next) return;
+  hasOpenTrades = next;
+  emitLiveChange();
+}
+
+export function isMetaApiWatchForced(): boolean {
+  if (!canUseDom()) return false;
+  try {
+    return sessionStorage.getItem(WATCH_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setMetaApiWatchForced(watch: boolean) {
+  if (!canUseDom()) return;
+  try {
+    if (watch) sessionStorage.setItem(WATCH_KEY, "1");
+    else sessionStorage.removeItem(WATCH_KEY);
+  } catch {
+    /* ignore */
+  }
+  emitLiveChange();
 }
 
 export function isMetaApiManuallyPaused(): boolean {
@@ -24,7 +58,14 @@ export function setMetaApiManuallyPaused(paused: boolean) {
   } catch {
     /* ignore */
   }
-  window.dispatchEvent(new Event(METAAPI_LIVE_EVENT));
+  if (paused) {
+    try {
+      sessionStorage.removeItem(WATCH_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
+  emitLiveChange();
 }
 
 export function isMetaApiPageActive(): boolean {
@@ -36,9 +77,10 @@ export function isMetaApiPageActive(): boolean {
   return true;
 }
 
-/** Live MetaAPI polling: page is visible/focused and the user has not paused. */
+/** Live MetaAPI polling: focused tab, not paused, and either an open trade or See live data. */
 export function isMetaApiLive(): boolean {
-  return isMetaApiPageActive() && !isMetaApiManuallyPaused();
+  if (!isMetaApiPageActive() || isMetaApiManuallyPaused()) return false;
+  return hasOpenTrades || isMetaApiWatchForced();
 }
 
 export function subscribeMetaApiLive(onChange: () => void): () => void {

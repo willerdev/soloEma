@@ -5,20 +5,24 @@ import {
   isMetaApiLive,
   isMetaApiManuallyPaused,
   isMetaApiPageActive,
+  isMetaApiWatchForced,
   setMetaApiManuallyPaused,
+  setMetaApiWatchForced,
   subscribeMetaApiLive,
 } from "@/lib/metaapi-live";
 
 export function useMetaApiLive() {
-  const [live, setLive] = useState(true);
+  const [live, setLive] = useState(false);
   const [manualPaused, setManualPaused] = useState(false);
   const [pageActive, setPageActive] = useState(true);
+  const [watchForced, setWatchForced] = useState(false);
 
   useEffect(() => {
     function sync() {
       setLive(isMetaApiLive());
       setManualPaused(isMetaApiManuallyPaused());
       setPageActive(isMetaApiPageActive());
+      setWatchForced(isMetaApiWatchForced());
     }
     sync();
     return subscribeMetaApiLive(sync);
@@ -28,5 +32,17 @@ export function useMetaApiLive() {
     setMetaApiManuallyPaused(paused);
   }, []);
 
-  return { live, manualPaused, pageActive, setPaused };
+  const seeLiveData = useCallback(() => {
+    setMetaApiManuallyPaused(false);
+    setMetaApiWatchForced(true);
+  }, []);
+
+  return {
+    live,
+    manualPaused,
+    pageActive,
+    watchForced,
+    setPaused,
+    seeLiveData,
+  };
 }

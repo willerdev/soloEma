@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bell,
   ClipboardList,
@@ -19,12 +19,15 @@ import { Mt5ChartTerminal } from "@/components/mt5/mt5-chart-terminal";
 import { TradingConnectDialog } from "@/components/mt5/trading-connect-dialog";
 import { TradingPlaceTradeCard } from "@/components/mt5/trading-place-trade-card";
 import { TradingAlertsPanel } from "@/components/mt5/trading-alerts-panel";
+import { TradingLiveBalance } from "@/components/mt5/trading-live-balance";
 import { Mt5PlaceOrderModal } from "@/components/mt5/mt5-place-order-modal";
 import { pickDefaultChartSymbol } from "@/lib/chart-market-status";
 import { useChartWatchlist } from "@/components/charts/use-chart-watchlist";
 import { usePriceAlertMonitor } from "@/hooks/use-price-alert-monitor";
 import { useMetaApiLive } from "@/hooks/use-metaapi-live";
+import { setMetaApiHasOpenTrades } from "@/lib/metaapi-live";
 import { cn } from "@/lib/utils";
+import { mt5DisplayBalance } from "@/components/mt5/mt5-ui";
 
 type RightTab = "watchlist" | "alerts" | "plan";
 
@@ -39,7 +42,7 @@ export default function SoloMt5Page() {
   const [orderModal, setOrderModal] = useState<"BUY" | "SELL" | null>(null);
   const [lotSize, setLotSize] = useState("0.01");
   const { watchlist, addSymbol } = useChartWatchlist();
-  const { live, manualPaused, pageActive, setPaused } = useMetaApiLive();
+  const { live, setPaused, seeLiveData } = useMetaApiLive();
 
   const {
     data,
@@ -83,6 +86,20 @@ export default function SoloMt5Page() {
 
   const linked = Boolean(data?.account);
   const needsConnect = !linked && !loading;
+  const hasOpenTrades =
+    displayRunningTrades.length > 0 || limitTrades.length > 0;
+
+  useEffect(() => {
+    setMetaApiHasOpenTrades(hasOpenTrades);
+  }, [hasOpenTrades]);
+
+  const account = data?.account;
+  const equity = account?.equity ?? account?.startingBalance ?? 0;
+  const walletBalance = account
+    ? data?.accountSource === "linked_live"
+      ? account.startingBalance + (account.floatingProfit ?? 0)
+      : mt5DisplayBalance(account, data?.accountSource)
+    : 0;
   const {
     alerts,
     addAlert,
@@ -130,35 +147,39 @@ export default function SoloMt5Page() {
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">
           Trading
         </h1>
+        <TradingLiveBalance
+          equity={equity}
+          balance={walletBalance}
+          currency={account?.currency ?? "USD"}
+          live={live}
+          linked={linked}
+        />
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setPaused(!manualPaused)}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold",
-              live
-                ? "border border-border bg-surface text-muted hover:text-foreground"
-                : "bg-amber-500/20 text-amber-200 hover:bg-amber-500/30",
-            )}
-            title={
-              live
-                ? "Pause MetaAPI while this tab is open"
-                : pageActive
-                  ? "Resume MetaAPI quotes"
-                  : "MetaAPI is paused while this tab is in the background"
-            }
-          >
-            {live ? (
-              <Pause className="h-3.5 w-3.5" />
-            ) : (
+          {linked && !live && (
+            <button
+              type="button"
+              onClick={() => {
+                seeLiveData();
+                void load({ background: true });
+                void loadRunning();
+              }}
+              className="inline-flex items-center gap-1.5 rounded-full bg-success px-4 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-success/90"
+            >
               <Play className="h-3.5 w-3.5" />
-            )}
-            {live
-              ? "Pause MetaAPI"
-              : manualPaused
-                ? "MetaAPI paused"
-                : "MetaAPI idle"}
-          </button>
+              See live data
+            </button>
+          )}
+          {linked && live && (
+            <button
+              type="button"
+              onClick={() => setPaused(true)}
+              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-3 py-1.5 text-xs font-semibold text-muted hover:text-foreground"
+              title="Pause MetaAPI while this tab is open"
+            >
+              <Pause className="h-3.5 w-3.5" />
+              Pause
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
