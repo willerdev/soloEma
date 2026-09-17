@@ -5,6 +5,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { randomBytes } from 'crypto';
+import { AsyncLocalStorage } from 'async_hooks';
 import { ConfigService } from '@nestjs/config';
 import { TradeDirection } from '@prisma/client';
 import { NotificationService } from '../email/notification.service';
@@ -209,6 +210,7 @@ export class MetaApiService {
     { account: MetaApiAccount; expiresAt: number }
   >();
   private readonly lastLimitAlertAt = new Map<string, number>();
+  private readonly requestToken = new AsyncLocalStorage<string>();
 
   constructor(
     private config: ConfigService,
@@ -265,8 +267,20 @@ export class MetaApiService {
       .catch(() => undefined);
   }
 
+  runWithToken<T>(token: string, fn: () => Promise<T>): Promise<T> {
+    return this.requestToken.run(token.trim(), fn);
+  }
+
+  hasRequestToken(): boolean {
+    return Boolean(this.requestToken.getStore()?.trim());
+  }
+
+  private activeToken(): string {
+    return this.requestToken.getStore()?.trim() || this.token;
+  }
+
   get isConfigured(): boolean {
-    return Boolean(this.token);
+    return Boolean(this.activeToken());
   }
 
   getConfiguredDefaultAccountId(): string | null {
@@ -329,7 +343,7 @@ export class MetaApiService {
   private headers(contentType = false) {
     const h: Record<string, string> = {
       Accept: 'application/json',
-      'auth-token': this.token,
+      'auth-token': this.activeToken(),
       'api-version': '2',
     };
     if (contentType) h['Content-Type'] = 'application/json';
@@ -340,7 +354,7 @@ export class MetaApiService {
   private marketDataHeaders() {
     return {
       Accept: 'application/json',
-      'auth-token': this.token,
+      'auth-token': this.activeToken(),
     };
   }
 

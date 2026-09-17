@@ -177,8 +177,6 @@ services:
         sync: false
       - key: API_PUBLIC_URL
         sync: false
-      - key: METAAPI_TOKEN
-        sync: false
       - key: METAAPI_PROVISIONING_URL
         sync: false
       - key: NOWPAYMENTS_API_KEY

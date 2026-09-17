@@ -108,8 +108,9 @@ export function Mt5LiveSyncCard({
   const body = (
     <div className="space-y-4">
       <p className="text-xs text-muted">
-        Trade on your linked MT5 account — the platform creates setups automatically and
-        mirrors your open, modify, and close actions. Sync runs about every 30 seconds.
+        After your MetaAPI token is saved, add this MT5 login, password, and broker
+        server. Solo provisions the account on your MetaAPI Cloud user — no platform
+        token on Render.
       </p>
 
       {!hasLinkedAccount && (

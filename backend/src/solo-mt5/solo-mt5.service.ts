@@ -7,6 +7,12 @@ import {
 } from '@nestjs/common';
 import { TradeDirection } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { resolveJwtSecret } from '../config/jwt-secret';
+import {
+  decryptCredential,
+  encryptCredential,
+} from '../common/credential-crypto.util';
+import { ConfigService } from '@nestjs/config';
 import {
   MetaApiAccount,
   MetaApiOrder,
@@ -40,13 +46,115 @@ export class SoloMt5Service {
   constructor(
     private prisma: PrismaService,
     private metaApi: MetaApiService,
+    private config: ConfigService,
   ) {}
 
+  private cryptoSecret() {
+    return resolveJwtSecret(this.config.get<string>('JWT_SECRET'));
+  }
+
+  private maskToken(token: string): string {
+    const t = token.trim();
+    if (t.length < 8) return '••••';
+    return `${t.slice(0, 4)}••••${t.slice(-2)}`;
+  }
+
+  private async decryptCloudToken(userId: string): Promise<string | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { metaApiTokenEnc: true },
+    });
+    if (!user?.metaApiTokenEnc) return null;
+    try {
+      const token = decryptCredential(user.metaApiTokenEnc, this.cryptoSecret());
+      return token.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async withCloud<T>(
+    userId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const token = await this.decryptCloudToken(userId);
+    if (token) return this.metaApi.runWithToken(token, fn);
+    return fn();
+  }
+
+  async cloudStatus(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        metaApiTokenEnc: true,
+        metaApiTokenSavedAt: true,
+        metaApiAccountId: true,
+      },
+    });
+    const connected = Boolean(user?.metaApiTokenEnc);
+    return {
+      connected,
+      connectedAt: user?.metaApiTokenSavedAt?.toISOString() ?? null,
+      tokenMasked: connected ? '••••••••' : null,
+      accountId: user?.metaApiAccountId ?? null,
+    };
+  }
+
+  async saveCloudToken(userId: string, token: string) {
+    const trimmed = token.trim();
+    if (trimmed.length < 8) {
+      throw new BadRequestException('That MetaAPI token looks too short.');
+    }
+    try {
+      const listed = await this.metaApi.runWithToken(trimmed, () =>
+        this.metaApi.listAccounts({ limit: 5 }),
+      );
+      if (!listed.configured) {
+        throw new BadRequestException('MetaAPI rejected that token.');
+      }
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      const msg = err instanceof Error ? err.message : 'Token check failed';
+      throw new BadRequestException(
+        /401|unauthorized|auth|not configured/i.test(msg)
+          ? 'MetaAPI rejected that token. Copy the API token from app.metaapi.cloud.'
+          : msg,
+      );
+    }
+
+    const enc = encryptCredential(trimmed, this.cryptoSecret());
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { metaApiTokenEnc: enc, metaApiTokenSavedAt: new Date() },
+    });
+    return {
+      connected: true,
+      connectedAt: new Date().toISOString(),
+      tokenMasked: this.maskToken(trimmed),
+    };
+  }
+
+  async disconnectCloudToken(userId: string) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        metaApiTokenEnc: null,
+        metaApiTokenSavedAt: null,
+        metaApiAccountId: null,
+      },
+    });
+    return { connected: false };
+  }
+
   async terminal(userId: string) {
+    return this.withCloud(userId, () => this.loadTerminal(userId));
+  }
+
+  private async loadTerminal(userId: string) {
     const linked = await this.linkedAccountId(userId);
     if (!this.metaApi.isConfigured) {
       return this.emptyTerminal(
-        'Set METAAPI_TOKEN on solo-api, then connect your MT5 login.',
+        'Paste your MetaAPI token in Settings, then connect an MT5 login.',
       );
     }
     if (!linked) {
@@ -109,6 +217,10 @@ export class SoloMt5Service {
   }
 
   async quotes(userId: string) {
+    return this.withCloud(userId, () => this.loadQuotes(userId));
+  }
+
+  private async loadQuotes(userId: string) {
     const ctx = await this.readyAccountOrNull(userId);
     if (!ctx) {
       return { items: [], refreshedAt: new Date().toISOString() };
@@ -181,6 +293,10 @@ export class SoloMt5Service {
   }
 
   async quote(userId: string, symbol: string) {
+    return this.withCloud(userId, () => this.loadQuote(userId, symbol));
+  }
+
+  private async loadQuote(userId: string, symbol: string) {
     const canonical = normalizeChartSymbol(symbol?.trim() || '');
     if (!canonical) {
       throw new BadRequestException('symbol is required');
@@ -202,6 +318,17 @@ export class SoloMt5Service {
   }
 
   async ohlc(
+    userId: string,
+    symbol: string,
+    timeframe: string,
+    limit?: number,
+  ) {
+    return this.withCloud(userId, () =>
+      this.loadOhlc(userId, symbol, timeframe, limit),
+    );
+  }
+
+  private async loadOhlc(
     userId: string,
     symbol: string,
     timeframe: string,
@@ -246,6 +373,10 @@ export class SoloMt5Service {
   }
 
   async batchQuotes(userId: string, symbols: string[]) {
+    return this.withCloud(userId, () => this.loadBatchQuotes(userId, symbols));
+  }
+
+  private async loadBatchQuotes(userId: string, symbols: string[]) {
     const unique = [
       ...new Set(
         symbols.map((s) => normalizeChartSymbol(s?.trim() || '')).filter(Boolean),
@@ -290,6 +421,17 @@ export class SoloMt5Service {
   }
 
   async previewOrder(
+    userId: string,
+    symbolRaw: string,
+    directionRaw: string,
+    volumeRaw?: number,
+  ) {
+    return this.withCloud(userId, () =>
+      this.loadPreviewOrder(userId, symbolRaw, directionRaw, volumeRaw),
+    );
+  }
+
+  private async loadPreviewOrder(
     userId: string,
     symbolRaw: string,
     directionRaw: string,
@@ -349,6 +491,10 @@ export class SoloMt5Service {
   }
 
   async placeOrder(userId: string, dto: PlaceMt5MarketOrderDto) {
+    return this.withCloud(userId, () => this.loadPlaceOrder(userId, dto));
+  }
+
+  private async loadPlaceOrder(userId: string, dto: PlaceMt5MarketOrderDto) {
     const ctx = await this.requireAccount(userId);
     const symbol = normalizeChartSymbol(dto.symbol);
     const { trade, price } = await this.metaApi.placeMarketOrder({
@@ -390,6 +536,16 @@ export class SoloMt5Service {
   }
 
   async modifyStops(
+    userId: string,
+    positionId: string,
+    dto: ModifyMt5PositionStopsDto,
+  ) {
+    return this.withCloud(userId, () =>
+      this.loadModifyStops(userId, positionId, dto),
+    );
+  }
+
+  private async loadModifyStops(
     userId: string,
     positionId: string,
     dto: ModifyMt5PositionStopsDto,
@@ -457,6 +613,10 @@ export class SoloMt5Service {
   }
 
   async closePosition(userId: string, positionId: string) {
+    return this.withCloud(userId, () => this.loadClosePosition(userId, positionId));
+  }
+
+  private async loadClosePosition(userId: string, positionId: string) {
     const ctx = await this.requireAccount(userId);
     const positions = await this.metaApi.getPositions(ctx.account);
     if (positions.some((p) => p.id === positionId)) {
@@ -472,6 +632,10 @@ export class SoloMt5Service {
   }
 
   async closeAll(userId: string) {
+    return this.withCloud(userId, () => this.loadCloseAll(userId));
+  }
+
+  private async loadCloseAll(userId: string) {
     const ctx = await this.requireAccount(userId);
     const positions = await this.metaApi.getPositions(ctx.account);
     const results: {
@@ -625,7 +789,7 @@ export class SoloMt5Service {
   private async requireAccount(userId: string) {
     if (!this.metaApi.isConfigured) {
       throw new ServiceUnavailableException(
-        'Set METAAPI_TOKEN on solo-api to enable live MT5 charts.',
+        'Paste your MetaAPI token in Settings, then connect an MT5 login.',
       );
     }
     const id = await this.linkedAccountId(userId);

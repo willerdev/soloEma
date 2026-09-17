@@ -44,7 +44,7 @@ Env:
 - **New:** `DATABASE_URL`, `JWT_SECRET`, `APP_VARIANT=solo`
 - **`FRONTEND_URL` / `PUBLIC_APP_URL`:** Solo site origin (e.g. `https://solo-web-xxxx.onrender.com`)
 - **`API_PUBLIC_URL`:** Solo API origin (e.g. `https://solo-api-xxxx.onrender.com`) so NOWPayments **per-invoice** `ipn_callback_url` hits this host (`/api/v1/payments/ipn`)
-- **Copy from traders-api:** `NOWPAYMENTS_*`, `FLW_*`, `RESEND_API_KEY`, `EMAIL_FROM`, `METAAPI_TOKEN` (live MT5 charts), plus S3 keys if contract document uploads are used
+- **Copy from traders-api:** `NOWPAYMENTS_*`, `FLW_*`, `RESEND_API_KEY`, `EMAIL_FROM`, plus S3 keys if contract document uploads are used. Solo MT5 charts use a **per-user MetaAPI token pasted in Settings** — do not put `METAAPI_TOKEN` on solo-api.
 
 Account-level NOWPayments IPN can only point at one URL. Solo invoices already send a per-payment callback to `API_PUBLIC_URL`. If IPN is global-only in the dashboard, use a second NOWPayments store or an IPN router. Same API keys are OK if callbacks reach solo-api.
 

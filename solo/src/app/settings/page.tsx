@@ -12,6 +12,7 @@ import { useAuthStore } from "@/stores/auth";
 import { AuthLoadingScreen, useRequireAuth } from "@/hooks/use-require-auth";
 import { useThemeStore } from "@/stores/theme";
 import { api } from "@/lib/api";
+import { MetaApiTokenCard } from "@/components/mt5/metaapi-token-card";
 
 export default function SettingsPage() {
   const { ready } = useRequireAuth();
@@ -77,7 +78,9 @@ export default function SettingsPage() {
     <div className="mx-auto max-w-lg space-y-5 px-4 py-6">
       <div>
         <h1 className="text-2xl font-bold text-white">Settings</h1>
-        <p className="mt-1 text-sm text-gray-400">Account and Deriv token</p>
+        <p className="mt-1 text-sm text-gray-400">
+          Account, MetaAPI, and Deriv
+        </p>
       </div>
 
       <Card>
@@ -104,6 +107,8 @@ export default function SettingsPage() {
           </Button>
         </CardContent>
       </Card>
+
+      <MetaApiTokenCard />
 
       <Card>
         <CardHeader>

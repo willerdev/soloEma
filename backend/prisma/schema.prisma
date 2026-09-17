@@ -350,6 +350,9 @@ model User {
   /// Encrypted Deriv API token (user-owned). Never returned in API payloads.
   derivApiTokenEnc               String?
   derivConnectedAt               DateTime?
+  /// Encrypted MetaAPI Cloud token (user-owned). Used on Solo instead of METAAPI_TOKEN.
+  metaApiTokenEnc                String?
+  metaApiTokenSavedAt            DateTime?
   createdAt                      DateTime   @default(now())
   updatedAt                      DateTime   @updatedAt
 

@@ -8,6 +8,7 @@ import { useAuthStore } from "@/stores/auth";
 import { useMt5Terminal } from "@/hooks/use-mt5-terminal";
 import { Mt5ChartTerminal } from "@/components/mt5/mt5-chart-terminal";
 import { Mt5LiveSyncCard } from "@/components/mt5/mt5-live-sync-card";
+import { MetaApiTokenCard } from "@/components/mt5/metaapi-token-card";
 import { pickDefaultChartSymbol } from "@/lib/chart-market-status";
 
 export default function SoloMt5Page() {
@@ -16,6 +17,7 @@ export default function SoloMt5Page() {
   const [selectedChartSymbol, setSelectedChartSymbol] = useState<string | null>(
     null,
   );
+  const [cloudConnected, setCloudConnected] = useState(false);
 
   const {
     data,
@@ -82,8 +84,8 @@ export default function SoloMt5Page() {
       <div className="border-b border-[var(--color-border)] px-4 py-3">
         <h1 className="text-xl font-bold text-white">Charts</h1>
         <p className="mt-0.5 text-sm text-muted">
-          Live MetaAPI candles. Open MT5 trades pin as entry, stop, and take-profit
-          lines.
+          Paste your MetaAPI token, add this MT5 login, then pin live trades as
+          entry, stop, and take-profit lines.
         </p>
       </div>
 
@@ -92,14 +94,17 @@ export default function SoloMt5Page() {
       )}
 
       {(needsConnect || !linked) && (
-        <div className="px-4 py-3">
-          <Mt5LiveSyncCard
-            tradingActive
-            linkedAccountId={null}
-            onAccountLinked={() => {
-              void load({ background: false });
-            }}
-          />
+        <div className="space-y-3 px-4 py-3">
+          <MetaApiTokenCard compact onChanged={setCloudConnected} />
+          {cloudConnected && (
+            <Mt5LiveSyncCard
+              tradingActive
+              linkedAccountId={null}
+              onAccountLinked={() => {
+                void load({ background: false });
+              }}
+            />
+          )}
         </div>
       )}
 

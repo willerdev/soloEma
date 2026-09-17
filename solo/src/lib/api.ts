@@ -352,6 +352,29 @@ class ApiClient {
       }),
   };
 
+  metaApi = {
+    status: () =>
+      this.request<{
+        connected: boolean;
+        connectedAt: string | null;
+        tokenMasked: string | null;
+        accountId: string | null;
+      }>("/metaapi/status"),
+    saveToken: (token: string) =>
+      this.request<{
+        connected: boolean;
+        connectedAt: string;
+        tokenMasked: string;
+      }>("/metaapi/token", {
+        method: "PUT",
+        body: JSON.stringify({ token }),
+      }),
+    disconnect: () =>
+      this.request<{ connected: boolean }>("/metaapi/token", {
+        method: "DELETE",
+      }),
+  };
+
   users = {
     dashboard: () => this.request<DashboardData>("/users/dashboard"),
     profile: () => this.request("/users/profile"),
