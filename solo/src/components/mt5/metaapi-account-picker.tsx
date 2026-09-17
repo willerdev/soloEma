@@ -10,12 +10,14 @@ type Props = {
   enabled?: boolean;
   showTokenField?: boolean;
   onLinked?: () => void;
+  bare?: boolean;
 };
 
 export function MetaApiAccountPicker({
   enabled = true,
   showTokenField = false,
   onLinked,
+  bare = false,
 }: Props) {
   const [token, setToken] = useState("");
   const [tokenSaved, setTokenSaved] = useState(false);
@@ -70,8 +72,13 @@ export function MetaApiAccountPicker({
   return (
     <form
       onSubmit={connect}
-      className="space-y-3 rounded-lg border border-[var(--color-border)] bg-card px-3 py-3"
+      className={
+        bare
+          ? "space-y-3"
+          : "space-y-3 rounded-lg border border-[var(--color-border)] bg-card px-3 py-3"
+      }
     >
+      {!bare && (
       <div>
         <p className="text-sm font-medium text-white">Monitor a MetaAPI account</p>
         <p className="mt-1 text-xs text-muted">
@@ -79,6 +86,7 @@ export function MetaApiAccountPicker({
           You do not enter MT5 login or password.
         </p>
       </div>
+      )}
 
       {showTokenField && (
         <div className="space-y-1.5">

@@ -305,12 +305,13 @@ export class WalletController {
   @UseGuards(JwtAuthGuard, AuthRateLimitGuard)
   saveNowpaymentsPayout(
     @Request() req: { user: { id: string } },
-    @Body() body: { email?: string; password?: string },
+    @Body() body: { email?: string; password?: string; apiKey?: string },
   ) {
     return this.wallet.saveNowpaymentsPayoutLogin(
       req.user.id,
       body.email ?? '',
       body.password ?? '',
+      body.apiKey,
     );
   }
 

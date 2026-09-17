@@ -54,7 +54,7 @@ export function NowpaymentsPayoutLoginCard() {
       setReady(s.payoutConfigured);
       setApiKeySet(s.apiKeySet);
       setPassword("");
-      setNotice("Saved. Both of you will use this NOWPayments login for payouts.");
+      setNotice("Payout username and password saved.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save");
     } finally {
@@ -63,13 +63,12 @@ export function NowpaymentsPayoutLoginCard() {
   }
 
   return (
-    <Card>
+    <Card className="h-full min-w-0">
       <CardHeader>
         <CardTitle>NOWPayments payout login</CardTitle>
         <CardDescription>
-          Username (email) and password for the NOWPayments payout account.
-          Either of you can enter them; they are shared for every withdrawal.
-          The API key stays on the server.
+          Save the NOWPayments username (email) and password used to send
+          withdrawals. The API key stays on the server.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -78,39 +77,42 @@ export function NowpaymentsPayoutLoginCard() {
         ) : (
           <form onSubmit={(e) => void save(e)} className="space-y-3">
             <p className="text-xs text-muted">
-              API key {apiKeySet ? "is set" : "is missing on solo-api"} · login{" "}
-              {ready ? "ready" : "not saved yet"}
+              API key {apiKeySet ? "is set on the server" : "is missing on solo-api"}
+              {" · "}
+              {ready ? "payout login ready" : "payout login not saved yet"}
               {masked ? ` (${masked})` : ""}
               {passwordSet ? " · password saved" : ""}
             </p>
-            <div className="space-y-1">
-              <Label htmlFor="np-email">Payout email / username</Label>
-              <Input
-                id="np-email"
-                type="email"
-                autoComplete="off"
-                placeholder="NOWPayments account email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="np-password">Payout password</Label>
-              <Input
-                id="np-password"
-                type="password"
-                autoComplete="new-password"
-                placeholder="NOWPayments account password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <Label htmlFor="np-email">Payout username</Label>
+                <Input
+                  id="np-email"
+                  type="email"
+                  autoComplete="off"
+                  placeholder="NOWPayments account email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="np-password">Payout password</Label>
+                <Input
+                  id="np-password"
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder="NOWPayments account password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+              </div>
             </div>
             {error && <p className="text-sm text-danger">{error}</p>}
             {notice && <p className="text-sm text-success">{notice}</p>}
             <Button type="submit" disabled={saving}>
-              {saving ? "Saving…" : "Save for both users"}
+              {saving ? "Saving…" : "Save"}
             </Button>
           </form>
         )}

@@ -78,122 +78,150 @@ export default function SettingsPage() {
   if (!ready) return <AuthLoadingScreen />;
 
   return (
-    <div className="mx-auto max-w-lg space-y-5 px-4 py-6">
-      <div>
+    <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 xl:px-8">
+      <div className="mb-6">
         <h1 className="text-2xl font-bold text-white">Settings</h1>
         <p className="mt-1 text-sm text-gray-400">
-          Account, MetaAPI, Deriv, and shared NOWPayments payout login
+          Account, MetaAPI, Deriv, and shared NOWPayments (deposits + withdrawals)
         </p>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Account</CardTitle>
-          <CardDescription>{user?.email ?? "Signed in"}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm text-gray-300">
-          <p>
-            Display name:{" "}
-            <span className="text-white">{user?.displayName ?? "—"}</span>
-          </p>
-          <Button
-            variant="secondary"
-            className="gap-2"
-            onClick={() => toggleTheme()}
-          >
-            {theme === "dark" ? (
-              <Sun className="h-4 w-4" />
-            ) : (
-              <Moon className="h-4 w-4" />
-            )}
-            {theme === "dark" ? "Light mode" : "Dark mode"}
-          </Button>
-        </CardContent>
-      </Card>
-
-      <MetaApiTokenCard onChanged={setMetaOk} />
-      {metaOk && <MetaApiAccountPicker enabled={metaOk} />}
-
-      <NowpaymentsPayoutLoginCard />
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Deriv / MT5</CardTitle>
-          <CardDescription>
-            On developers.deriv.com create a Native PAT app, put that App ID
-            on solo-api as DERIV_APP_ID, then paste a PAT with Trade, Payments,
-            and Account management. We never show the full token again after
-            save.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {connected && (
-            <p className="text-sm text-success">
-              Connected {masked ? `(${masked})` : ""}
+      <div className="grid w-full min-w-0 grid-cols-1 items-stretch gap-5 lg:grid-cols-2">
+        <Card className="min-w-0 h-full">
+          <CardHeader>
+            <CardTitle>Account</CardTitle>
+            <CardDescription>{user?.email ?? "Signed in"}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm text-gray-300">
+            <p>
+              Display name:{" "}
+              <span className="text-white">{user?.displayName ?? "—"}</span>
             </p>
-          )}
-          <form onSubmit={saveToken} className="space-y-2">
-            <Label htmlFor="deriv-token">API token</Label>
-            <Input
-              id="deriv-token"
-              type="password"
-              autoComplete="off"
-              placeholder="Paste token"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              required
-            />
-            <div className="flex flex-wrap gap-2">
-              <Button type="submit" disabled={saving}>
-                {saving ? "Saving…" : "Save token"}
-              </Button>
-              {connected && (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  disabled={saving}
-                  onClick={() => void disconnect()}
-                >
-                  Disconnect
-                </Button>
+            <Button
+              variant="secondary"
+              className="gap-2"
+              onClick={() => toggleTheme()}
+            >
+              {theme === "dark" ? (
+                <Sun className="h-4 w-4" />
+              ) : (
+                <Moon className="h-4 w-4" />
               )}
-              <Link href="/deriv">
-                <Button type="button" variant="ghost">
-                  Open Deriv
+              {theme === "dark" ? "Light mode" : "Dark mode"}
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card className="min-w-0 h-full">
+          <CardHeader>
+            <CardTitle>Password</CardTitle>
+            <CardDescription>
+              We email a reset link. No KYC is required on Solo.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Link href="/forgot-password">
+              <Button variant="secondary">Reset password</Button>
+            </Link>
+          </CardContent>
+        </Card>
+
+        <MetaApiTokenCard onChanged={setMetaOk} className="min-w-0 h-full" />
+
+        {metaOk ? (
+          <Card className="min-w-0 h-full">
+            <CardHeader>
+              <CardTitle>Monitor a MetaAPI account</CardTitle>
+              <CardDescription>
+                Paste the account ID from the top of the card in app.metaapi.cloud.
+                You do not enter MT5 login or password.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <MetaApiAccountPicker enabled={metaOk} bare />
+            </CardContent>
+          </Card>
+        ) : (
+          <Card className="min-w-0 h-full">
+            <CardHeader>
+              <CardTitle>Monitor a MetaAPI account</CardTitle>
+              <CardDescription>
+                Save a MetaAPI token first, then paste the Cloud account UUID
+                here to watch that terminal.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        )}
+
+        <NowpaymentsPayoutLoginCard />
+
+        <Card className="min-w-0 h-full">
+          <CardHeader>
+            <CardTitle>Deriv / MT5</CardTitle>
+            <CardDescription>
+              On developers.deriv.com create a Native PAT app, put that App ID
+              on solo-api as DERIV_APP_ID, then paste a PAT with Trade, Payments,
+              and Account management. We never show the full token again after
+              save.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {connected && (
+              <p className="text-sm text-success">
+                Connected {masked ? `(${masked})` : ""}
+              </p>
+            )}
+            <form onSubmit={saveToken} className="space-y-2">
+              <Label htmlFor="deriv-token">API token</Label>
+              <Input
+                id="deriv-token"
+                type="password"
+                autoComplete="off"
+                placeholder="Paste token"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                required
+              />
+              <div className="flex flex-wrap gap-2">
+                <Button type="submit" disabled={saving}>
+                  {saving ? "Saving…" : "Save token"}
                 </Button>
-              </Link>
-            </div>
-          </form>
-          {derivMsg && <p className="text-sm text-success">{derivMsg}</p>}
-          {derivErr && <p className="text-sm text-danger">{derivErr}</p>}
-        </CardContent>
-      </Card>
+                {connected && (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={saving}
+                    onClick={() => void disconnect()}
+                  >
+                    Disconnect
+                  </Button>
+                )}
+                <Link href="/deriv">
+                  <Button type="button" variant="ghost">
+                    Open Deriv
+                  </Button>
+                </Link>
+              </div>
+            </form>
+            {derivMsg && <p className="text-sm text-success">{derivMsg}</p>}
+            {derivErr && <p className="text-sm text-danger">{derivErr}</p>}
+          </CardContent>
+        </Card>
+      </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Password</CardTitle>
-          <CardDescription>
-            We email a reset link. No KYC is required on Solo.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Link href="/forgot-password">
-            <Button variant="secondary">Reset password</Button>
-          </Link>
-        </CardContent>
-      </Card>
-
-      <Button
-        variant="danger"
-        className="gap-2"
-        onClick={() => {
-          logout();
-          router.replace("/login");
-        }}
-      >
-        <LogOut className="h-4 w-4" />
-        Sign out
-      </Button>
+      <div className="mt-6">
+        <Button
+          variant="danger"
+          className="gap-2"
+          onClick={() => {
+            logout();
+            router.replace("/login");
+          }}
+        >
+          <LogOut className="h-4 w-4" />
+          Sign out
+        </Button>
+      </div>
     </div>
   );
 }

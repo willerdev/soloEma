@@ -333,7 +333,7 @@ export class PayoutService {
       };
     }
 
-    return this.sendExternalWalletPayout(payout, adminId, settlement);
+    return this.sendExternalWalletPayout(payout, adminId, settlement, network);
   }
 
   private async sendExternalWalletPayout(
@@ -350,6 +350,7 @@ export class PayoutService {
     },
     adminId: string,
     settlement: 'gateway' | 'external' = 'gateway',
+    network = 'TRC20',
   ) {
     const amount = Number(payout.traderShare);
     const destination = payout.walletAddress?.trim();
@@ -483,9 +484,11 @@ export class PayoutService {
       };
     }
 
-    if (!this.nowPayments.isConfigured) {
+    if (!(await this.nowPayments.ensureConfigured())) {
       throw new BadRequestException(
-        'NOWPayments is not configured — set NOWPAYMENTS_API_KEY before approving wallet withdrawals',
+        isSoloApp()
+          ? 'NOWPayments is not configured — save the shared API key in Settings so both of you can withdraw'
+          : 'NOWPayments is not configured — set NOWPAYMENTS_API_KEY before approving wallet withdrawals',
       );
     }
 
@@ -512,7 +515,7 @@ export class PayoutService {
       );
     }
 
-    const currency = this.nowPayments.mapNetworkToCurrency('TRC20');
+    const currency = this.nowPayments.mapNetworkToCurrency(network);
     let result: { id: string };
     try {
       result = await this.nowPayments.createPayout({
@@ -757,6 +760,7 @@ export class PayoutService {
     skip = false,
   ) {
     if (skip) return;
+    if (isSoloApp()) return;
     if (payout.source !== 'DEPOSITOR' || !INSTANT_WITHDRAW_SAFETY_HOLD_ENABLED) {
       return;
     }

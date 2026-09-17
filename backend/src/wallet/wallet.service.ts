@@ -573,7 +573,8 @@ export class WalletService {
         config?.investorDailyYieldPercent ?? 0.5,
       ),
       minDepositUsdt: Number(config?.depositorMinDepositUsdt ?? 50),
-      autoWithdrawEligible: Boolean(vipUser?.autoWithdrawEligible),
+      autoWithdrawEligible:
+        isSoloApp() || Boolean(vipUser?.autoWithdrawEligible),
     };
   }
 
@@ -723,7 +724,7 @@ export class WalletService {
   }
 
   async getDepositMinimum(network: string) {
-    if (!this.nowPayments.isConfigured) {
+    if (!(await this.nowPayments.ensureConfigured())) {
       return {
         minUsdt: DEPOSIT_MIN_FALLBACK_USDT,
         network: network.toUpperCase(),
@@ -782,9 +783,9 @@ export class WalletService {
       },
     });
 
-    if (!this.nowPayments.isConfigured) {
+    if (!(await this.nowPayments.ensureConfigured())) {
       throw new ServiceUnavailableException(
-        'Crypto deposits are not configured — contact support',
+        'Crypto deposits are not configured — save the shared NOWPayments API key in Settings, or set NOWPAYMENTS_API_KEY on solo-api',
       );
     }
 
@@ -793,7 +794,9 @@ export class WalletService {
         amount,
         orderId: payment.id,
         network,
-        description: 'TraderRank platform wallet deposit',
+        description: isSoloApp()
+          ? 'soloEmma wallet deposit'
+          : 'TraderRank platform wallet deposit',
         ipnCallbackUrl: this.ipnUrl(),
       });
 
@@ -1700,7 +1703,7 @@ export class WalletService {
     });
     const vvipActive = isInvestorVvipActive(vipUser ?? {});
     const instantWithdraw =
-      Boolean(vipUser?.instantWithdraw) || vvipActive;
+      isSoloApp() || Boolean(vipUser?.instantWithdraw) || vvipActive;
     const config = await this.getPlatformConfig();
     const quote = this.quoteUserWithdrawFees(grossAmount, vipUser ?? {}, config);
     const fee = quote.totalFeesUsdt;
@@ -1798,13 +1801,27 @@ export class WalletService {
     await this.recordLoanWithdraw(userId, grossAmount);
 
     const silentPending =
-      INSTANT_WITHDRAW_SAFETY_HOLD_ENABLED && instantWithdraw && !isMomo;
+      !isSoloApp() &&
+      INSTANT_WITHDRAW_SAFETY_HOLD_ENABLED &&
+      instantWithdraw &&
+      !isMomo;
 
-    if (instantWithdraw && !isMomo && !INSTANT_WITHDRAW_SAFETY_HOLD_ENABLED) {
+    const sendViaNowpayments =
+      !isMomo &&
+      (isSoloApp() ||
+        (instantWithdraw && !INSTANT_WITHDRAW_SAFETY_HOLD_ENABLED));
+
+    if (sendViaNowpayments) {
       try {
         const result = await this.payouts.approveAndSendPayout(
           payout.id,
           `instant_${userId}`,
+          savedWallet.network?.toUpperCase().includes('BEP')
+            ? 'BEP20'
+            : savedWallet.network?.toUpperCase().includes('ERC')
+              ? 'ERC20'
+              : 'TRC20',
+          { skipSafetyHold: isSoloApp() },
         );
         const gatewayPayoutId =
           'gatewayPayoutId' in result ? result.gatewayPayoutId : undefined;
@@ -2017,6 +2034,7 @@ export class WalletService {
     userId: string,
     email: string,
     password: string,
+    apiKey?: string,
   ) {
     if (!isSoloApp()) {
       throw new ForbiddenException(
@@ -2026,6 +2044,7 @@ export class WalletService {
     return this.nowPayments.saveSharedPayoutLogin({
       email,
       password,
+      apiKey,
       userId,
     });
   }
@@ -2076,7 +2095,7 @@ export class WalletService {
       : Number(config?.walletWithdrawalFeeUsdt ?? WALLET_WITHDRAWAL_FEE_USD);
 
     return {
-      eligible: user.autoWithdrawEligible,
+      eligible: isSoloApp() || user.autoWithdrawEligible,
       eligibleAt: user.autoWithdrawEligibleAt?.toISOString() ?? null,
       enabled: user.autoWithdrawEnabled,
       savedWalletId: user.autoWithdrawWalletId,
@@ -2112,7 +2131,7 @@ export class WalletService {
       },
     });
     if (!user) throw new NotFoundException('User not found');
-    if (!user.autoWithdrawEligible) {
+    if (!user.autoWithdrawEligible && !isSoloApp()) {
       throw new BadRequestException(
         'Daily auto-withdraw is only available for new wallet depositors',
       );
@@ -2125,7 +2144,13 @@ export class WalletService {
       autoWithdrawEnabled?: boolean;
       autoWithdrawWalletId?: string | null;
       autoWithdrawAmount?: number | null;
+      autoWithdrawEligible?: boolean;
+      autoWithdrawEligibleAt?: Date;
     } = {};
+    if (isSoloApp() && !user.autoWithdrawEligible) {
+      data.autoWithdrawEligible = true;
+      data.autoWithdrawEligibleAt = new Date();
+    }
 
     if (input.enabled != null) {
       if (input.enabled) {
@@ -2217,11 +2242,12 @@ export class WalletService {
     const todayUtc = now.toISOString().slice(0, 10);
     const users = await this.prisma.user.findMany({
       where: {
-        autoWithdrawEligible: true,
         autoWithdrawEnabled: true,
         autoWithdrawWalletId: { not: null },
-        depositorActive: true,
         status: { notIn: ['BANNED', 'SUSPENDED'] },
+        ...(isSoloApp()
+          ? {}
+          : { autoWithdrawEligible: true, depositorActive: true }),
       },
       select: {
         id: true,

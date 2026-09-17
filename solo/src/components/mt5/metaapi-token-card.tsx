@@ -7,13 +7,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 type Props = {
   compact?: boolean;
   onChanged?: (connected: boolean) => void;
+  className?: string;
 };
 
-export function MetaApiTokenCard({ compact = false, onChanged }: Props) {
+export function MetaApiTokenCard({ compact = false, onChanged, className }: Props) {
   const [token, setToken] = useState("");
   const [connected, setConnected] = useState(false);
   const [masked, setMasked] = useState<string | null>(null);
@@ -127,7 +129,7 @@ export function MetaApiTokenCard({ compact = false, onChanged }: Props) {
   }
 
   return (
-    <Card>
+    <Card className={cn("h-full min-w-0", className)}>
       <CardHeader>
         <CardTitle>MetaAPI</CardTitle>
         <CardDescription>

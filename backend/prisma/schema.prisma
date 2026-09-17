@@ -1197,6 +1197,7 @@ model PlatformConfig {
   nowpaymentsPayoutPasswordEnc   String?
   nowpaymentsPayoutUpdatedAt     DateTime?
   nowpaymentsPayoutUpdatedById   String?
+  nowpaymentsApiKeyEnc           String?
 
   /// Launch / vault contract config (Remix deploy) — preferred over env when set.
   contractAddress      String?

@@ -61,11 +61,16 @@ export class ComplianceService {
   }
 
   async requireKycForPayout(userId: string) {
-    await this.requireActiveTrader(userId);
-
     if (isSoloApp()) {
+      const user = await this.prisma.user.findUnique({ where: { id: userId } });
+      if (!user) throw new NotFoundException('User not found');
+      if (user.status === 'SUSPENDED' || user.status === 'BANNED') {
+        throw new ForbiddenException('Account is suspended');
+      }
       return;
     }
+
+    await this.requireActiveTrader(userId);
 
     const config = await this.prisma.platformConfig.findUnique({
       where: { id: 'default' },

@@ -98,7 +98,7 @@ export class PaymentsService {
     description: string;
     promoMeta?: Record<string, unknown>;
   }) {
-    if (!this.nowPayments.isConfigured) {
+    if (!(await this.nowPayments.ensureConfigured())) {
       throw new ServiceUnavailableException(
         'Crypto payments are not configured — contact support',
       );
@@ -942,7 +942,7 @@ export class PaymentsService {
       !gatewayId.startsWith('pending_') &&
       !gatewayId.startsWith('promo_');
 
-    if (hasGateway && this.nowPayments.isConfigured) {
+    if (hasGateway && (await this.nowPayments.ensureConfigured())) {
       try {
         const live = await this.nowPayments.getPaymentStatus(gatewayId);
         const status = live.payment_status?.toLowerCase();
@@ -1177,7 +1177,7 @@ export class PaymentsService {
       gatewayId &&
       !gatewayId.startsWith('pending_') &&
       !gatewayId.startsWith('promo_') &&
-      this.nowPayments.isConfigured
+      (await this.nowPayments.ensureConfigured())
     ) {
       try {
         const live = await this.nowPayments.getPaymentStatus(gatewayId);

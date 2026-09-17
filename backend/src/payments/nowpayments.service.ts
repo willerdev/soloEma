@@ -34,7 +34,7 @@ function sleep(ms: number) {
 export class NowPaymentsService {
   private readonly logger = new Logger(NowPaymentsService.name);
   private readonly apiUrl: string;
-  private readonly apiKey: string;
+  private apiKey: string;
   private payoutToken: string | null = null;
   private payoutTokenExpiry = 0;
   private readonly statusCache = new Map<
@@ -44,8 +44,12 @@ export class NowPaymentsService {
   private static readonly STATUS_TTL_MS = 45_000;
   private static readonly MAX_429_RETRIES = 3;
 
-  private credsCache: { email: string; password: string; at: number } | null =
-    null;
+  private credsCache: {
+    apiKey: string;
+    email: string;
+    password: string;
+    at: number;
+  } | null = null;
 
   constructor(
     private config: ConfigService,
@@ -68,6 +72,11 @@ export class NowPaymentsService {
     return Boolean(this.apiKey);
   }
 
+  async ensureConfigured(): Promise<boolean> {
+    const { apiKey } = await this.resolvePayoutCreds();
+    return Boolean(apiKey);
+  }
+
   get isPayoutConfigured(): boolean {
     return (
       this.isConfigured &&
@@ -78,15 +87,15 @@ export class NowPaymentsService {
 
   /** Safe diagnostics — never returns secret values. */
   async getPayoutConfigStatus() {
-    const { email, password } = await this.resolvePayoutCreds();
+    const { apiKey, email, password } = await this.resolvePayoutCreds();
     const emailSet = Boolean(email);
     const passwordSet = Boolean(password);
     return {
-      apiKeySet: this.isConfigured,
+      apiKeySet: Boolean(apiKey),
       payoutEmailSet: emailSet,
       payoutEmailMasked: emailSet ? this.maskEmail(email) : null,
       payoutPasswordSet: passwordSet,
-      payoutConfigured: this.isConfigured && emailSet && passwordSet,
+      payoutConfigured: Boolean(apiKey) && emailSet && passwordSet,
       shared: isSoloApp(),
     };
   }
@@ -112,10 +121,12 @@ export class NowPaymentsService {
   async saveSharedPayoutLogin(input: {
     email: string;
     password: string;
+    apiKey?: string;
     userId: string;
   }) {
     const email = input.email.trim().toLowerCase();
     const password = input.password.trim();
+    const apiKey = input.apiKey?.trim() ?? '';
     if (!email.includes('@') || email.length < 5) {
       throw new HttpException(
         'Enter the NOWPayments account email.',
@@ -129,18 +140,23 @@ export class NowPaymentsService {
       );
     }
     const enc = encryptCredential(password, this.cryptoSecret());
+    const apiEnc = apiKey
+      ? encryptCredential(apiKey, this.cryptoSecret())
+      : undefined;
     await this.prisma.platformConfig.upsert({
       where: { id: 'default' },
       create: {
         id: 'default',
         nowpaymentsPayoutEmail: email,
         nowpaymentsPayoutPasswordEnc: enc,
+        nowpaymentsApiKeyEnc: apiEnc,
         nowpaymentsPayoutUpdatedAt: new Date(),
         nowpaymentsPayoutUpdatedById: input.userId,
       },
       update: {
         nowpaymentsPayoutEmail: email,
         nowpaymentsPayoutPasswordEnc: enc,
+        ...(apiEnc ? { nowpaymentsApiKeyEnc: apiEnc } : {}),
         nowpaymentsPayoutUpdatedAt: new Date(),
         nowpaymentsPayoutUpdatedById: input.userId,
       },
@@ -191,12 +207,14 @@ export class NowPaymentsService {
   }
 
   private async resolvePayoutCreds(): Promise<{
+    apiKey: string;
     email: string;
     password: string;
   }> {
     if (this.credsCache && Date.now() - this.credsCache.at < 15_000) {
       return this.credsCache;
     }
+    let apiKey = this.envValue('NOWPAYMENTS_API_KEY', 'NOW_PAYMENTS_API_KEY');
     let email = this.envPayoutEmail();
     let password = this.envPayoutPassword();
     if (isSoloApp()) {
@@ -206,6 +224,7 @@ export class NowPaymentsService {
           select: {
             nowpaymentsPayoutEmail: true,
             nowpaymentsPayoutPasswordEnc: true,
+            nowpaymentsApiKeyEnc: true,
           },
         });
         const dbEmail = row?.nowpaymentsPayoutEmail?.trim();
@@ -220,14 +239,25 @@ export class NowPaymentsService {
             this.logger.warn('Could not decrypt shared NOWPayments payout password');
           }
         }
+        if (row?.nowpaymentsApiKeyEnc) {
+          try {
+            apiKey = decryptCredential(
+              row.nowpaymentsApiKeyEnc,
+              this.cryptoSecret(),
+            );
+          } catch {
+            this.logger.warn('Could not decrypt shared NOWPayments API key');
+          }
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : '';
-        if (!/nowpaymentsPayout|Unknown arg|column/i.test(msg)) {
+        if (!/nowpaymentsPayout|nowpaymentsApiKey|Unknown arg|column/i.test(msg)) {
           this.logger.warn(`Payout creds DB read failed: ${msg}`);
         }
       }
     }
-    this.credsCache = { email, password, at: Date.now() };
+    if (apiKey) this.apiKey = apiKey;
+    this.credsCache = { apiKey, email, password, at: Date.now() };
     return this.credsCache;
   }
 
@@ -239,13 +269,23 @@ export class NowPaymentsService {
     };
   }
 
+  private defaultOrderDescription() {
+    return isSoloApp() ? 'soloEmma wallet' : 'TraderRank Pro payment';
+  }
+
   private async requestOnce<T>(
     path: string,
     options: RequestInit = {},
   ): Promise<T> {
+    await this.resolvePayoutCreds();
+    const headers = new Headers(options.headers ?? undefined);
+    if (this.apiKey) {
+      headers.set('x-api-key', this.apiKey);
+    }
+    const init: RequestInit = { ...options, headers };
     let res: Response;
     try {
-      res = await fetch(`${this.apiUrl}${path}`, options);
+      res = await fetch(`${this.apiUrl}${path}`, init);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'Network request failed';
@@ -367,7 +407,7 @@ export class NowPaymentsService {
         price_currency: priceCurrency,
         pay_currency: payCurrency,
         order_id: params.orderId,
-        order_description: params.description || 'TraderRank Pro payment',
+        order_description: params.description || this.defaultOrderDescription(),
         is_fixed_rate: false,
         is_fee_paid_by_user: false,
       };
@@ -434,7 +474,7 @@ export class NowPaymentsService {
         price_currency: 'usdt',
         pay_currency: payCurrency,
         order_id: params.orderId,
-        order_description: params.description || 'TraderRank Pro payment',
+        order_description: params.description || this.defaultOrderDescription(),
         success_url: params.successUrl,
         cancel_url: params.cancelUrl,
         ...(params.ipnCallbackUrl
