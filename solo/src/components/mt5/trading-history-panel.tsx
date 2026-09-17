@@ -23,6 +23,13 @@ function formatWhen(iso: string) {
   });
 }
 
+function friendlyHistoryError(error: string) {
+  if (/<!DOCTYPE|<\s*html/i.test(error)) {
+    return "Could not refresh trade history. Showing cached trades.";
+  }
+  return error;
+}
+
 export function TradingHistoryPanel({
   items,
   loading,
@@ -30,8 +37,8 @@ export function TradingHistoryPanel({
   dealCount = 0,
 }: Props) {
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center justify-between">
         <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">
           Closed trades
         </p>
@@ -39,7 +46,11 @@ export function TradingHistoryPanel({
           <Loader2 className="h-3.5 w-3.5 animate-spin text-muted" />
         )}
       </div>
-      {error && <p className="text-xs text-danger">{error}</p>}
+      {error && (
+        <p className="mt-2 line-clamp-2 shrink-0 text-xs text-danger">
+          {friendlyHistoryError(error)}
+        </p>
+      )}
       {items.length === 0 && !loading ? (
         <p className="px-1 py-8 text-center text-xs text-muted">
           {dealCount > 0
@@ -47,7 +58,7 @@ export function TradingHistoryPanel({
             : "No closed trades from MetaAPI yet. History loads from the account deal list (not from open positions)."}
         </p>
       ) : (
-        <ul className="space-y-1.5">
+        <ul className="mt-2 min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-contain pr-0.5">
           {items.map((row) => (
             <li
               key={row.id}

@@ -283,7 +283,7 @@ export default function SoloMt5Page() {
           </div>
         </div>
 
-        <aside className="flex min-h-0 w-full shrink-0 flex-col gap-3 md:h-auto md:w-[22rem]">
+        <aside className="flex min-h-0 w-full shrink-0 flex-col gap-3 overflow-hidden md:h-full md:w-[22rem]">
           <TradingPlaceTradeCard
             linked={linked}
             lotSize={lotSize}
@@ -299,7 +299,7 @@ export default function SoloMt5Page() {
             onSell={() => setOrderModal("SELL")}
             onNeedConnect={() => setConnectOpen(true)}
           />
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-surface">
+          <div className="flex max-h-[min(28rem,50dvh)] min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-surface md:max-h-none">
             <div className="flex border-b border-border text-xs font-medium">
               {(
                 [
@@ -324,9 +324,9 @@ export default function SoloMt5Page() {
                 </button>
               ))}
             </div>
-            <div className="min-h-[12rem] flex-1 overflow-y-auto p-3">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3">
               {rightTab === "watchlist" && (
-                <ul className="space-y-1">
+                <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain">
                   {watchlist.map((sym) => (
                     <li key={sym}>
                       <button
@@ -346,6 +346,7 @@ export default function SoloMt5Page() {
                 </ul>
               )}
               {rightTab === "alerts" && (
+                <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
                 <TradingAlertsPanel
                   symbol={chartSymbol}
                   lastPrice={lastAlertPrice}
@@ -356,14 +357,17 @@ export default function SoloMt5Page() {
                   onRemove={removeAlert}
                   onDismissToast={dismissToast}
                 />
+                </div>
               )}
               {rightTab === "history" && (
+                <div className="min-h-0 flex-1">
                 <TradingHistoryPanel
                   items={historyItems}
                   loading={historyLoading}
                   error={historyError}
                   dealCount={historyDealCount}
                 />
+                </div>
               )}
             </div>
           </div>
