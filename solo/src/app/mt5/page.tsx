@@ -98,7 +98,7 @@ export default function SoloMt5Page() {
   if (!ready) return <AuthLoadingScreen />;
 
   return (
-    <div className="flex min-h-[calc(100dvh-5.5rem)] flex-col bg-background text-foreground md:min-h-[calc(100dvh-0.25rem)]">
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-background text-foreground">
       <header className="flex shrink-0 flex-wrap items-center gap-3 px-4 py-3 md:px-5">
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">
           Trading
@@ -132,7 +132,7 @@ export default function SoloMt5Page() {
                 <Loader2 className="h-7 w-7 animate-spin text-muted" />
               </div>
             ) : (
-              <div className="min-h-[52vh] flex-1 md:min-h-0">
+              <div className="flex min-h-0 flex-1 flex-col">
                 <Mt5ChartTerminal
                   quotes={quotes}
                   runningTrades={displayRunningTrades}
@@ -188,7 +188,7 @@ export default function SoloMt5Page() {
           </div>
         </div>
 
-        <aside className="flex w-full shrink-0 flex-col md:w-[22rem]">
+        <aside className="flex min-h-0 w-full shrink-0 flex-col md:h-auto md:w-[22rem]">
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-surface">
             <div className="flex border-b border-border text-xs font-medium">
               {(

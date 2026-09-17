@@ -572,6 +572,8 @@ export function Navbar() {
 
 export function MainContent({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
+  const pathname = usePathname();
+  const tradingDesk = isAuthenticated && isMt5Route(pathname);
 
   return (
     <main
@@ -580,6 +582,8 @@ export function MainContent({ children }: { children: React.ReactNode }) {
         isAuthenticated &&
           "pb-[calc(5.25rem+env(safe-area-inset-bottom,0px))] md:pb-0",
         isAuthenticated && "md:pl-[calc(4.5rem+1.5rem)]",
+        tradingDesk &&
+          "flex h-dvh min-h-0 flex-col overflow-hidden pb-0 md:pb-0",
       )}
     >
       {children}
