@@ -322,57 +322,76 @@ export class SoloMt5Service {
       ),
     ].slice(0, 32);
 
-    const items = await Promise.all(
-      symbols.map(async (symbol) => {
-        const pos = positions.find(
-          (p) => normalizeChartSymbol(p.symbol) === symbol,
-        );
-        try {
-          const price = await this.metaApi.getSymbolPrice(ctx.account, symbol);
-          const bid = price.bid;
-          const ask = price.ask;
-          const mid = (bid + ask) / 2;
-          const entryMid = pos?.openPrice ?? mid;
-          return {
-            signalId: pos?.id ?? symbol,
-            symbol,
-            direction: pos
-              ? isSellType(pos.type)
-                ? 'SELL'
-                : 'BUY'
-              : 'BUY',
-            entryMin: entryMid,
-            entryMax: entryMid,
-            entryMid,
-            bid,
-            ask,
-            mid,
-            spread: ask - bid,
-            change: mid - entryMid,
-            changePct: entryMid !== 0 ? ((mid - entryMid) / entryMid) * 100 : 0,
-            time: price.time,
-            submittedAt: new Date().toISOString(),
-          };
-        } catch {
-          return {
-            signalId: symbol,
-            symbol,
-            direction: 'BUY',
-            entryMin: 0,
-            entryMax: 0,
-            entryMid: 0,
-            bid: null,
-            ask: null,
-            mid: null,
-            spread: null,
-            change: null,
-            changePct: null,
-            time: null,
-            submittedAt: new Date().toISOString(),
-          };
-        }
-      }),
-    );
+    const items: Array<{
+      signalId: string;
+      symbol: string;
+      direction: string;
+      entryMin: number;
+      entryMax: number;
+      entryMid: number;
+      bid: number | null;
+      ask: number | null;
+      mid: number | null;
+      spread: number | null;
+      change: number | null;
+      changePct: number | null;
+      time: string | null;
+      submittedAt: string;
+    }> = [];
+    for (const symbol of symbols.slice(0, 8)) {
+      const pos = positions.find(
+        (p) => normalizeChartSymbol(p.symbol) === symbol,
+      );
+      try {
+        const price = await this.metaApi.getSymbolPrice(ctx.account, symbol);
+        const bid = price.bid;
+        const ask = price.ask;
+        const mid = (bid + ask) / 2;
+        const entryMid = pos?.openPrice ?? mid;
+        items.push({
+          signalId: pos?.id ?? symbol,
+          symbol,
+          direction: pos
+            ? isSellType(pos.type)
+              ? 'SELL'
+              : 'BUY'
+            : 'BUY',
+          entryMin: entryMid,
+          entryMax: entryMid,
+          entryMid,
+          bid,
+          ask,
+          mid,
+          spread: ask - bid,
+          change: mid - entryMid,
+          changePct: entryMid !== 0 ? ((mid - entryMid) / entryMid) * 100 : 0,
+          time: price.time,
+          submittedAt: new Date().toISOString(),
+        });
+      } catch {
+        const mid = pos?.currentPrice ?? 0;
+        items.push({
+          signalId: symbol,
+          symbol,
+          direction: pos
+            ? isSellType(pos.type)
+              ? 'SELL'
+              : 'BUY'
+            : 'BUY',
+          entryMin: mid,
+          entryMax: mid,
+          entryMid: mid,
+          bid: mid || null,
+          ask: mid || null,
+          mid: mid || null,
+          spread: null,
+          change: null,
+          changePct: null,
+          time: null,
+          submittedAt: new Date().toISOString(),
+        });
+      }
+    }
 
     return { items, refreshedAt: new Date().toISOString() };
   }

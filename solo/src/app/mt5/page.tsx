@@ -98,9 +98,9 @@ export default function SoloMt5Page() {
   if (!ready) return <AuthLoadingScreen />;
 
   return (
-    <div className="solo-trading-desk flex min-h-[calc(100dvh-5.5rem)] flex-col bg-[#F3F4FA] text-slate-900 md:min-h-[calc(100dvh-0.25rem)]">
+    <div className="flex min-h-[calc(100dvh-5.5rem)] flex-col bg-background text-foreground md:min-h-[calc(100dvh-0.25rem)]">
       <header className="flex shrink-0 flex-wrap items-center gap-3 px-4 py-3 md:px-5">
-        <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
+        <h1 className="text-2xl font-semibold tracking-tight text-foreground">
           Trading
         </h1>
         <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -109,27 +109,27 @@ export default function SoloMt5Page() {
             onClick={() => {
               if (!linked) setConnectOpen(true);
             }}
-            className="inline-flex items-center gap-1.5 rounded-full bg-[#22C55E] px-4 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-[#16A34A]"
+            className="inline-flex items-center gap-1.5 rounded-full bg-success px-4 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-success/90"
           >
             <Zap className="h-3.5 w-3.5" />
             Trade
           </button>
-          <span className="hidden items-center rounded-full bg-[#6D5EF6] px-3 py-1.5 text-xs font-medium text-white sm:inline-flex">
+          <span className="hidden items-center rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-white sm:inline-flex">
             Pre-Market Routine 0/3
           </span>
         </div>
       </header>
 
       {error && (
-        <p className="px-4 pb-2 text-sm text-red-600 md:px-5">{error}</p>
+        <p className="px-4 pb-2 text-sm text-danger md:px-5">{error}</p>
       )}
 
       <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 pb-4 md:flex-row md:px-5">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-surface">
             {loading && !data ? (
               <div className="flex flex-1 items-center justify-center py-24">
-                <Loader2 className="h-7 w-7 animate-spin text-slate-400" />
+                <Loader2 className="h-7 w-7 animate-spin text-muted" />
               </div>
             ) : (
               <div className="min-h-[52vh] flex-1 md:min-h-0">
@@ -155,20 +155,19 @@ export default function SoloMt5Page() {
                     void load({ background: true });
                     void loadRunning();
                   }}
-                  showOrdersPanel={false}
-                  showTradeBar={false}
-                  forceChartTheme="light"
+                  showOrdersPanel={linked}
+                  showTradeBar={linked}
                   workspaceLayout
                 />
               </div>
             )}
 
             {needsConnect && (
-              <div className="border-t border-slate-100 px-4 py-8 text-center sm:px-8">
-                <h2 className="text-lg font-semibold text-slate-900">
+              <div className="border-t border-border px-4 py-8 text-center sm:px-8">
+                <h2 className="text-lg font-semibold text-foreground">
                   Connect your trading account before you trade
                 </h2>
-                <p className="mx-auto mt-2 max-w-lg text-sm text-slate-500">
+                <p className="mx-auto mt-2 max-w-lg text-sm text-muted">
                   To use the trading workspace, you&apos;ll need to connect your
                   trading account first. Once connected, you can start taking
                   trades inside your workflow.
@@ -176,12 +175,12 @@ export default function SoloMt5Page() {
                 <button
                   type="button"
                   onClick={() => setConnectOpen(true)}
-                  className="mt-5 inline-flex items-center gap-2 rounded-full bg-[#6D5EF6] px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-[#6D5EF6]/30 hover:bg-[#5B4CE8]"
+                  className="mt-5 inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-primary/25 hover:bg-primary/90"
                 >
                   <Plus className="h-4 w-4" />
                   Connect Trading Account
                 </button>
-                <p className="mt-3 text-xs text-slate-400">
+                <p className="mt-3 text-xs text-muted">
                   Need help connecting?
                 </p>
               </div>
@@ -189,22 +188,9 @@ export default function SoloMt5Page() {
           </div>
         </div>
 
-        <aside className="flex w-full shrink-0 flex-col gap-3 md:w-[22rem]">
-          <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm">
-            <p className="text-sm font-semibold text-slate-800">Discipline</p>
-            <div className="mt-3 space-y-2">
-              {[1, 2, 3, 4, 5].map((n) => (
-                <div
-                  key={n}
-                  className="h-8 rounded-lg bg-slate-100/90"
-                  style={{ width: `${88 - n * 6}%` }}
-                />
-              ))}
-            </div>
-          </div>
-
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
-            <div className="flex border-b border-slate-100 text-xs font-medium">
+        <aside className="flex w-full shrink-0 flex-col md:w-[22rem]">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-surface">
+            <div className="flex border-b border-border text-xs font-medium">
               {(
                 [
                   ["watchlist", "Watchlist", Star],
@@ -219,8 +205,8 @@ export default function SoloMt5Page() {
                   className={cn(
                     "flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5",
                     rightTab === id
-                      ? "border-b-2 border-[#6D5EF6] text-slate-900"
-                      : "text-slate-400 hover:text-slate-600",
+                      ? "border-b-2 border-primary text-foreground"
+                      : "text-muted hover:text-foreground",
                   )}
                 >
                   <Icon className="h-3.5 w-3.5" />
@@ -239,8 +225,8 @@ export default function SoloMt5Page() {
                         className={cn(
                           "w-full rounded-lg px-3 py-2 text-left text-sm",
                           chartSymbol === sym
-                            ? "bg-[#6D5EF6]/10 font-semibold text-[#5B4CE8]"
-                            : "text-slate-700 hover:bg-slate-50",
+                            ? "bg-primary/15 font-semibold text-primary"
+                            : "text-foreground/80 hover:bg-navy/60",
                         )}
                       >
                         {sym}
@@ -254,7 +240,7 @@ export default function SoloMt5Page() {
                   {[1, 2, 3, 4, 5, 6].map((n) => (
                     <div
                       key={n}
-                      className="h-7 rounded-lg bg-slate-100"
+                      className="h-7 rounded-lg bg-navy/80"
                       style={{ width: `${94 - n * 5}%` }}
                     />
                   ))}
@@ -265,7 +251,7 @@ export default function SoloMt5Page() {
                   {[1, 2, 3, 4, 5].map((n) => (
                     <div
                       key={n}
-                      className="h-7 rounded-lg bg-slate-100"
+                      className="h-7 rounded-lg bg-navy/80"
                       style={{ width: `${90 - n * 7}%` }}
                     />
                   ))}

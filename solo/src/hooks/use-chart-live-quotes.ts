@@ -4,8 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import type { RealtimeQuote } from "@/components/charts/chart-data.service";
 
-const ACTIVE_SYMBOL_MS = 400;
-const WATCHLIST_MS = 2000;
+const ACTIVE_SYMBOL_MS = 2500;
+const WATCHLIST_MS = 10000;
 
 function normalizeSymbol(symbol: string): string {
   return symbol.trim().toUpperCase();

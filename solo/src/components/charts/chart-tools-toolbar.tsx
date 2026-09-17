@@ -73,7 +73,7 @@ export function ChartToolsToolbar({
         className={cn(
           "flex gap-0.5 p-0.5",
           vertical
-            ? "flex-col rounded-xl border border-slate-200 bg-white"
+            ? "flex-col rounded-xl border border-[var(--mt5-divider)] bg-[var(--mt5-surface)]"
             : "items-center rounded-lg border border-[var(--mt5-divider)] bg-[var(--mt5-surface)]",
         )}
       >
@@ -87,12 +87,8 @@ export function ChartToolsToolbar({
               "flex items-center justify-center rounded-md transition-colors",
               vertical ? "h-8 w-8" : "h-7 w-7",
               activeTool === id
-                ? vertical
-                  ? "bg-[#6D5EF6] text-white"
-                  : "bg-primary text-white"
-                : vertical
-                  ? "text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                  : "text-[var(--mt5-muted)] hover:bg-[var(--mt5-row-hover)] hover:text-[var(--mt5-text)]",
+                ? "bg-primary text-white"
+                : "text-[var(--mt5-muted)] hover:bg-[var(--mt5-row-hover)] hover:text-[var(--mt5-text)]",
             )}
             aria-label={label}
             aria-pressed={activeTool === id}
@@ -113,10 +109,7 @@ export function ChartToolsToolbar({
           type="button"
           onClick={() => onDone?.()}
           className={cn(
-            "rounded-md px-2 py-1 text-[10px] font-semibold",
-            vertical
-              ? "border border-slate-200 text-slate-600 hover:bg-slate-50"
-              : "border border-[var(--mt5-divider)] text-[var(--mt5-text)] hover:bg-[var(--mt5-row-hover)]",
+            "rounded-md px-2 py-1 text-[10px] font-semibold border border-[var(--mt5-divider)] text-[var(--mt5-text)] hover:bg-[var(--mt5-row-hover)]",
           )}
         >
           Done

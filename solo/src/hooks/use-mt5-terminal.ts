@@ -162,8 +162,8 @@ export function useMt5Terminal(
     if (!canLoad || (tab !== "trades" && tab !== "chart")) return;
     const start = window.setTimeout(() => {
       void loadRunning();
-    }, 0);
-    const id = window.setInterval(() => void loadRunning(), 1000);
+    }, 2500);
+    const id = window.setInterval(() => void loadRunning(), 8000);
     return () => {
       window.clearTimeout(start);
       window.clearInterval(id);
@@ -174,8 +174,8 @@ export function useMt5Terminal(
     if (!canLoad || (tab !== "quotes" && tab !== "chart")) return;
     const start = window.setTimeout(() => {
       void loadQuotes();
-    }, 0);
-    const id = window.setInterval(() => void loadQuotes(), 1000);
+    }, 4000);
+    const id = window.setInterval(() => void loadQuotes(), 8000);
     return () => {
       window.clearTimeout(start);
       window.clearInterval(id);
@@ -184,7 +184,7 @@ export function useMt5Terminal(
 
   useEffect(() => {
     if (!canLoad || tab !== "chart") return;
-    const id = window.setInterval(() => void load({ background: true }), 5000);
+    const id = window.setInterval(() => void load({ background: true }), 20000);
     return () => window.clearInterval(id);
   }, [canLoad, tab, load]);
 

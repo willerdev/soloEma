@@ -210,6 +210,10 @@ export class MetaApiService {
     { account: MetaApiAccount; expiresAt: number }
   >();
   private readonly lastLimitAlertAt = new Map<string, number>();
+  private readonly terminalSnapshotCache = new Map<
+    string,
+    { expiresAt: number; value: unknown }
+  >();
   private readonly requestToken = new AsyncLocalStorage<string>();
 
   constructor(
@@ -233,7 +237,7 @@ export class MetaApiService {
    * (throttled), and throws a trader-friendly BadRequestException.
    */
   private raiseBrokerError(raw: string, context: string, fallback?: string): never {
-    this.logger.error(`MetaAPI ${context} failed: ${raw.slice(0, 500)}`);
+    this.logger.warn(`MetaAPI ${context} failed: ${raw.slice(0, 500)}`);
     const kind = classifyBrokerError(raw);
     if (isPlatformLimitError(kind)) {
       this.alertAdminsOfLimit(kind, raw, context);
@@ -265,6 +269,32 @@ export class MetaApiService {
         'You will not receive another email about this limit for 6 hours.',
       ])
       .catch(() => undefined);
+  }
+
+  private snapshotCacheKey(kind: string, accountId: string) {
+    return `${kind}:${accountId}:${this.activeToken().slice(-12)}`;
+  }
+
+  private async cachedSnapshot<T>(
+    key: string,
+    ttlMs: number,
+    loader: () => Promise<T>,
+  ): Promise<T> {
+    const hit = this.terminalSnapshotCache.get(key);
+    if (hit && hit.expiresAt > Date.now()) {
+      return hit.value as T;
+    }
+    try {
+      const value = await loader();
+      this.terminalSnapshotCache.set(key, {
+        value,
+        expiresAt: Date.now() + ttlMs,
+      });
+      return value;
+    } catch (err) {
+      if (hit) return hit.value as T;
+      throw err;
+    }
   }
 
   runWithToken<T>(token: string, fn: () => Promise<T>): Promise<T> {
@@ -691,12 +721,15 @@ export class MetaApiService {
         const price = await this.fetchSymbolPrice(account, brokerSymbol);
         this.symbolPriceCache.set(cacheKey, {
           price,
-          expiresAt: Date.now() + 3_000,
+          expiresAt: Date.now() + 8_000,
         });
         return price;
       } catch (err) {
         if (err instanceof BadRequestException) {
           lastError = err;
+          if (classifyBrokerError(err.message) === 'rate_limit') {
+            break;
+          }
           continue;
         }
         throw err;
@@ -709,7 +742,7 @@ export class MetaApiService {
         const price = await this.fetchSymbolPrice(account, resolved);
         this.symbolPriceCache.set(cacheKey, {
           price,
-          expiresAt: Date.now() + 3_000,
+          expiresAt: Date.now() + 8_000,
         });
         return price;
       } catch (err) {
@@ -924,9 +957,19 @@ export class MetaApiService {
   async getAccountInformation(
     account: MetaApiAccount,
   ): Promise<MetaApiAccountInformation> {
+    return this.cachedSnapshot(
+      this.snapshotCacheKey('info', account.id),
+      6_000,
+      () => this.fetchAccountInformation(account),
+    );
+  }
+
+  private async fetchAccountInformation(
+    account: MetaApiAccount,
+  ): Promise<MetaApiAccountInformation> {
     const base = this.clientUrl(account.region);
     const res = await fetch(
-      `${base}/users/current/accounts/${encodeURIComponent(account.id)}/account-information?refreshTerminalState=true`,
+      `${base}/users/current/accounts/${encodeURIComponent(account.id)}/account-information?refreshTerminalState=false`,
       { headers: this.headers() },
     );
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -975,9 +1018,19 @@ export class MetaApiService {
   }
 
   async getPositions(account: MetaApiAccount): Promise<MetaApiPosition[]> {
+    return this.cachedSnapshot(
+      this.snapshotCacheKey('positions', account.id),
+      6_000,
+      () => this.fetchPositions(account),
+    );
+  }
+
+  private async fetchPositions(
+    account: MetaApiAccount,
+  ): Promise<MetaApiPosition[]> {
     const base = this.clientUrl(account.region);
     const res = await fetch(
-      `${base}/users/current/accounts/${encodeURIComponent(account.id)}/positions?refreshTerminalState=true`,
+      `${base}/users/current/accounts/${encodeURIComponent(account.id)}/positions?refreshTerminalState=false`,
       { headers: this.headers() },
     );
     const body = (await res.json().catch(() => ({}))) as unknown;
@@ -1014,9 +1067,17 @@ export class MetaApiService {
   }
 
   async getOrders(account: MetaApiAccount): Promise<MetaApiOrder[]> {
+    return this.cachedSnapshot(
+      this.snapshotCacheKey('orders', account.id),
+      6_000,
+      () => this.fetchOrders(account),
+    );
+  }
+
+  private async fetchOrders(account: MetaApiAccount): Promise<MetaApiOrder[]> {
     const base = this.clientUrl(account.region);
     const res = await fetch(
-      `${base}/users/current/accounts/${encodeURIComponent(account.id)}/orders?refreshTerminalState=true`,
+      `${base}/users/current/accounts/${encodeURIComponent(account.id)}/orders?refreshTerminalState=false`,
       { headers: this.headers() },
     );
     const body = (await res.json().catch(() => ({}))) as unknown;

@@ -102,15 +102,6 @@ html.light .mt5-shell {
   --mt5-row-hover: rgba(0, 0, 0, 0.03);
 }
 
-.solo-trading-desk .mt5-shell {
-  --mt5-text: #1a1a1a;
-  --mt5-muted: #6b7280;
-  --mt5-bg: #ffffff;
-  --mt5-surface: #f8f9fa;
-  --mt5-divider: rgba(15, 23, 42, 0.08);
-  --mt5-row-hover: rgba(15, 23, 42, 0.04);
-}
-
 /* Floating mobile bottom nav */
 .mobile-nav-dock {
   --nav-dock-bg: #0D1B2A;

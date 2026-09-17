@@ -34,11 +34,9 @@ import {
 import { useMt5ChartDisplaySettings } from "@/hooks/use-mt5-chart-display-settings";
 import { useAuthStore } from "@/stores/auth";
 import {
-  mt5BalanceLabel,
   mt5DisplayBalance,
   MT5_BUY,
   MT5_SELL,
-  Mt5DirectionTag,
   Mt5Pnl,
   fmtMt5Price,
 } from "@/components/mt5/mt5-ui";
@@ -186,11 +184,12 @@ export function Mt5ChartTerminal({
   }, [liveQuote?.mid, watchlistQuotes, selectedSymbol, checkPriceAlerts]);
 
   useEffect(() => {
+    if (workspaceLayout) return;
     const others = watchlist.filter((sym) => sym !== selectedSymbol);
     for (const sym of others) {
       prefetchChartBarCache(sym, timeframe, () => loadChartData(sym, timeframe));
     }
-  }, [watchlist, selectedSymbol, timeframe]);
+  }, [watchlist, selectedSymbol, timeframe, workspaceLayout]);
 
   const openOrders = useMemo((): OrderRow[] => {
     const rows: OrderRow[] = [];
@@ -439,8 +438,7 @@ export function Mt5ChartTerminal({
   return (
     <div
       className={cn(
-        "flex min-h-0 flex-col bg-[var(--mt5-bg)]",
-        forceChartTheme === "light" && "mt5-shell",
+        "mt5-shell flex min-h-0 flex-col bg-[var(--mt5-bg)]",
         chartOnly
           ? "h-full min-h-0 flex-1 overflow-hidden pb-[calc(4.25rem+env(safe-area-inset-bottom,0px))] md:pb-0"
           : desktopTerminal
@@ -513,7 +511,7 @@ export function Mt5ChartTerminal({
         }
       >
         {workspaceLayout && (
-          <div className="flex w-11 shrink-0 flex-col items-center border-r border-slate-100 bg-white py-2">
+          <div className="flex w-11 shrink-0 flex-col items-center border-r border-[var(--mt5-divider)] bg-[var(--mt5-surface)] py-2">
             <ChartToolsToolbar
               orientation="vertical"
               activeTool={activeTool}
@@ -534,7 +532,7 @@ export function Mt5ChartTerminal({
           }
         >
           {workspaceLayout && (
-            <div className="flex shrink-0 items-center gap-1 border-b border-slate-100 px-2 py-1.5">
+            <div className="flex shrink-0 items-center gap-1 border-b border-[var(--mt5-divider)] bg-[var(--mt5-surface)] px-2 py-1.5">
               {CHART_TIMEFRAMES.map((tf) => (
                 <button
                   key={tf}
@@ -543,8 +541,8 @@ export function Mt5ChartTerminal({
                   className={cn(
                     "rounded-md px-2 py-1 text-xs font-medium",
                     timeframe === tf
-                      ? "bg-slate-900 text-white"
-                      : "text-slate-500 hover:bg-slate-100",
+                      ? "bg-primary text-white"
+                      : "text-[var(--mt5-muted)] hover:bg-[var(--mt5-row-hover)]",
                   )}
                 >
                   {TF_DESK_LABEL[tf]}
@@ -561,7 +559,7 @@ export function Mt5ChartTerminal({
                 className="ml-2 min-w-0 max-w-[14rem]"
                 hideChips
               />
-              <span className="ml-auto hidden text-xs text-slate-400 sm:inline">
+              <span className="ml-auto hidden text-xs text-[var(--mt5-muted)] sm:inline">
                 Indicators
               </span>
             </div>
@@ -608,7 +606,7 @@ export function Mt5ChartTerminal({
         ref={chartAreaRef}
         className={cn(
           "relative w-full",
-          chartOnly
+          chartOnly || workspaceLayout
             ? "min-h-0 flex-1"
             : desktopTerminal
               ? "min-h-[200px] h-[min(42vh,280px)] flex-1 lg:min-h-0"
@@ -719,7 +717,12 @@ export function Mt5ChartTerminal({
 
       {/* Desktop MT5-style terminal — hidden on phone */}
       {showOrdersPanel && (
-        <div className="hidden md:flex md:max-h-[32vh] md:shrink-0 md:flex-col md:border-t md:border-[var(--mt5-divider)]">
+        <div
+          className={cn(
+            "flex max-h-[36vh] shrink-0 flex-col border-t border-[var(--mt5-divider)]",
+            !workspaceLayout && "hidden md:flex md:max-h-[32vh]",
+          )}
+        >
           <div className="grid grid-cols-[1.1fr_0.75fr_0.55fr_0.45fr_0.65fr_0.65fr_0.6fr_0.6fr_0.65fr_0.55fr] gap-2 border-b border-[var(--mt5-divider)] bg-[var(--mt5-surface)] px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--mt5-muted)]">
             <span>Symbol</span>
             <span>Ticket</span>
@@ -733,9 +736,9 @@ export function Mt5ChartTerminal({
             <span className="text-right">Action</span>
           </div>
 
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-x-auto overflow-y-auto">
             {openOrders.length === 0 ? (
-              <div className="flex flex-col items-center justify-center gap-2 py-10 text-center">
+              <div className="flex flex-col items-center justify-center gap-2 py-6 text-center">
                 <p className="text-sm text-[var(--mt5-muted)]">
                   You don&apos;t have any open positions
                 </p>
@@ -827,11 +830,13 @@ export function Mt5ChartTerminal({
           {/* Account summary bar — MT5 terminal footer */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-[var(--mt5-divider)] bg-[var(--mt5-surface)] px-3 py-2 text-[11px] text-[var(--mt5-muted)]">
             <span>
-              {mt5BalanceLabel(accountSource)}:{" "}
+              Balance:{" "}
               <strong className="text-[var(--mt5-text)]">
                 {fmtMt5Price(
                   account
-                    ? mt5DisplayBalance(account, accountSource)
+                    ? accountSource === "linked_live"
+                      ? account.startingBalance + (account.floatingProfit ?? 0)
+                      : mt5DisplayBalance(account, accountSource)
                     : 0,
                 )}
               </strong>
