@@ -68,6 +68,14 @@ export class SoloMt5Controller {
     return this.mt5.running(req.user.id);
   }
 
+  @Get('mt5/history')
+  getHistory(
+    @Request() req: { user: { id: string } },
+    @Query('fresh') fresh?: string,
+  ) {
+    return this.mt5.history(req.user.id, fresh === '1' || fresh === 'true');
+  }
+
   @Get('mt5/terminal')
   getTerminal(@Request() req: { user: { id: string } }) {
     return this.mt5.terminal(req.user.id);

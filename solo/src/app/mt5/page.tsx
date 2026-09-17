@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bell,
-  ClipboardList,
+  History,
   Loader2,
   Pause,
   Play,
@@ -19,6 +19,8 @@ import { Mt5ChartTerminal } from "@/components/mt5/mt5-chart-terminal";
 import { TradingConnectDialog } from "@/components/mt5/trading-connect-dialog";
 import { TradingPlaceTradeCard } from "@/components/mt5/trading-place-trade-card";
 import { TradingAlertsPanel } from "@/components/mt5/trading-alerts-panel";
+import { TradingHistoryPanel } from "@/components/mt5/trading-history-panel";
+import { useMt5History } from "@/hooks/use-mt5-history";
 import { TradingLiveBalance } from "@/components/mt5/trading-live-balance";
 import { Mt5PlaceOrderModal } from "@/components/mt5/mt5-place-order-modal";
 import { pickDefaultChartSymbol } from "@/lib/chart-market-status";
@@ -29,7 +31,7 @@ import { setMetaApiHasOpenTrades } from "@/lib/metaapi-live";
 import { cn } from "@/lib/utils";
 import { mt5DisplayBalance } from "@/components/mt5/mt5-ui";
 
-type RightTab = "watchlist" | "alerts" | "plan";
+type RightTab = "watchlist" | "alerts" | "history";
 
 export default function SoloMt5Page() {
   const { ready, hasHydrated } = useRequireAuth();
@@ -108,6 +110,12 @@ export default function SoloMt5Page() {
     dismissToast,
     lastPrices,
   } = usePriceAlertMonitor(linked);
+  const {
+    items: historyItems,
+    loading: historyLoading,
+    error: historyError,
+    load: loadHistory,
+  } = useMt5History(userId, linked, rightTab === "history");
 
   const lastAlertPrice = useMemo(() => {
     const live = lastPrices[chartSymbol.toUpperCase()];
@@ -127,16 +135,20 @@ export default function SoloMt5Page() {
         await api.signals.closeMt5Position(id);
         await load({ background: true });
         await loadRunning();
+        window.setTimeout(() => {
+          void loadHistory({ fresh: true });
+        }, 1200);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not close trade");
       }
     },
-    [load, loadRunning, setError],
+    [load, loadRunning, loadHistory, setError],
   );
 
   function afterLinked() {
     void load({ background: false });
     void loadRunning();
+    void loadHistory({ fresh: true });
   }
 
   if (!ready) return <AuthLoadingScreen />;
@@ -232,6 +244,7 @@ export default function SoloMt5Page() {
                   onTradePlaced={() => {
                     void load({ background: true });
                     void loadRunning();
+                    void loadHistory({ fresh: true });
                   }}
                   showOrdersPanel={linked}
                   showTradeBar={false}
@@ -288,7 +301,7 @@ export default function SoloMt5Page() {
                 [
                   ["watchlist", "Watchlist", Star],
                   ["alerts", "Alerts", Bell],
-                  ["plan", "Trading Plan", ClipboardList],
+                  ["history", "History", History],
                 ] as const
               ).map(([id, label, Icon]) => (
                 <button
@@ -340,16 +353,12 @@ export default function SoloMt5Page() {
                   onDismissToast={dismissToast}
                 />
               )}
-              {rightTab === "plan" && (
-                <div className="space-y-2 pt-1">
-                  {[1, 2, 3, 4, 5].map((n) => (
-                    <div
-                      key={n}
-                      className="h-7 rounded-lg bg-navy/80"
-                      style={{ width: `${90 - n * 7}%` }}
-                    />
-                  ))}
-                </div>
+              {rightTab === "history" && (
+                <TradingHistoryPanel
+                  items={historyItems}
+                  loading={historyLoading}
+                  error={historyError}
+                />
               )}
             </div>
           </div>
@@ -371,6 +380,7 @@ export default function SoloMt5Page() {
             setOrderModal(null);
             void load({ background: true });
             void loadRunning();
+            void loadHistory({ fresh: true });
           }}
         />
       )}

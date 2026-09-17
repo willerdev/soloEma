@@ -15,6 +15,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import {
   MetaApiAccount,
+  MetaApiDeal,
   MetaApiOrder,
   MetaApiPosition,
   MetaApiService,
@@ -766,6 +767,76 @@ export class SoloMt5Service {
       }
     }
     return { ok: true, results };
+  }
+
+  async history(userId: string, fresh = false) {
+    return this.withCloud(userId, () => this.loadHistory(userId, fresh));
+  }
+
+  private async loadHistory(userId: string, fresh: boolean) {
+    const ctx = await this.readyAccountOrNull(userId);
+    if (!ctx) {
+      return { items: [], count: 0, refreshedAt: new Date().toISOString() };
+    }
+    const deals = await this.metaApi.getHistoryDeals(ctx.account, {
+      days: 60,
+      fresh,
+    });
+    const items = this.mapClosedDeals(deals).slice(0, 80);
+    return {
+      items,
+      count: items.length,
+      refreshedAt: new Date().toISOString(),
+    };
+  }
+
+  private mapClosedDeals(deals: MetaApiDeal[]) {
+    const opens = new Map<string, MetaApiDeal>();
+    for (const deal of deals) {
+      const entry = deal.entry.toUpperCase();
+      if (entry.includes('IN') && !entry.includes('OUT')) {
+        opens.set(deal.positionId || deal.id, deal);
+      }
+    }
+
+    const closed = deals.filter((deal) =>
+      deal.entry.toUpperCase().includes('OUT'),
+    );
+    const items = closed.map((out) => {
+      const inn = opens.get(out.positionId);
+      const direction = inn
+        ? isSellType(inn.type)
+          ? 'SELL'
+          : 'BUY'
+        : isSellType(out.type)
+          ? 'BUY'
+          : 'SELL';
+      const pnl = out.profit + out.swap + out.commission + (inn?.commission ?? 0);
+      const status = pnl > 0 ? 'WON' : pnl < 0 ? 'LOST' : 'ARCHIVED';
+      const submittedAt = inn?.time || out.time;
+      return {
+        id: out.id || out.positionId,
+        signalId: out.positionId || out.id,
+        symbol: out.symbol || inn?.symbol || '',
+        direction,
+        status,
+        entryMin: inn?.price ?? out.price,
+        entryMax: inn?.price ?? out.price,
+        stopLoss: 0,
+        takeProfit: 0,
+        entryPrice: inn?.price ?? null,
+        exitPrice: out.price,
+        pnl,
+        isWin: pnl > 0 ? true : pnl < 0 ? false : null,
+        submittedAt,
+        closedAt: out.time,
+      };
+    });
+
+    items.sort(
+      (a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime(),
+    );
+    return items;
   }
 
   private emptyTerminal(message: string) {

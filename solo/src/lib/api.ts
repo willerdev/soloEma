@@ -650,6 +650,10 @@ class ApiClient {
     },
     mt5Running: () =>
       this.request<UserMt5RunningResult>("/signals/mt5/running"),
+    mt5History: (fresh?: boolean) => {
+      const q = fresh ? "?fresh=1" : "";
+      return this.request<UserMt5HistoryResult>(`/signals/mt5/history${q}`);
+    },
     closeMt5Position: (positionId: string) =>
       this.request<{ ok: boolean; positionId: string; status?: string }>(
         `/signals/mt5/positions/${encodeURIComponent(positionId)}/close`,
@@ -3312,6 +3316,12 @@ export interface UserMt5HistoryItem {
   isWin: boolean | null;
   submittedAt: string;
   closedAt: string;
+}
+
+export interface UserMt5HistoryResult {
+  items: UserMt5HistoryItem[];
+  count: number;
+  refreshedAt: string;
 }
 
 export interface UserMt5QuoteItem {

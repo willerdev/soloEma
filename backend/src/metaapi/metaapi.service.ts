@@ -119,6 +119,21 @@ export type MetaApiPosition = {
   clientId?: string;
 };
 
+export type MetaApiDeal = {
+  id: string;
+  type: string;
+  entry: string;
+  time: string;
+  symbol: string;
+  volume: number;
+  price: number;
+  profit: number;
+  commission: number;
+  swap: number;
+  positionId: string;
+  orderId?: string;
+};
+
 export type MetaApiOrder = {
   id: string;
   type: string;
@@ -1095,6 +1110,68 @@ export class MetaApiService {
     return body.map((row) => this.mapOrder(row as Record<string, unknown>));
   }
 
+  private mapDeal(raw: Record<string, unknown>): MetaApiDeal {
+    return {
+      id: String(raw.id ?? ''),
+      type: String(raw.type ?? ''),
+      entry: String(raw.entry ?? ''),
+      time: String(raw.time ?? raw.brokerTime ?? ''),
+      symbol: String(raw.symbol ?? ''),
+      volume: Number(raw.volume ?? 0),
+      price: Number(raw.price ?? 0),
+      profit: Number(raw.profit ?? 0),
+      commission: Number(raw.commission ?? 0),
+      swap: Number(raw.swap ?? 0),
+      positionId: String(raw.positionId ?? raw.id ?? ''),
+      orderId: raw.orderId != null ? String(raw.orderId) : undefined,
+    };
+  }
+
+  async getHistoryDeals(
+    account: MetaApiAccount,
+    opts?: { days?: number; fresh?: boolean },
+  ): Promise<MetaApiDeal[]> {
+    const days = Math.min(Math.max(opts?.days ?? 60, 1), 120);
+    const key = this.snapshotCacheKey('history', account.id);
+    if (opts?.fresh) {
+      this.terminalSnapshotCache.delete(key);
+    }
+    return this.cachedSnapshot(key, opts?.fresh ? 0 : 20_000, () =>
+      this.fetchHistoryDeals(account, days),
+    );
+  }
+
+  private async fetchHistoryDeals(
+    account: MetaApiAccount,
+    days: number,
+  ): Promise<MetaApiDeal[]> {
+    const end = new Date();
+    const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+    const base = this.clientUrl(account.region);
+    const url =
+      `${base}/users/current/accounts/${encodeURIComponent(account.id)}` +
+      `/history-deals/time/${encodeURIComponent(start.toISOString())}` +
+      `/${encodeURIComponent(end.toISOString())}`;
+    const res = await fetch(url, { headers: this.headers() });
+    const body = (await res.json().catch(() => ({}))) as unknown;
+
+    if (!res.ok) {
+      const err = body as Record<string, unknown>;
+      this.raiseBrokerError(
+        String(err.message ?? `status ${res.status}`),
+        'trade history read',
+        'Could not read trade history right now. Please try again in a few minutes.',
+      );
+    }
+
+    const rows = Array.isArray(body)
+      ? body
+      : Array.isArray((body as { deals?: unknown }).deals)
+        ? ((body as { deals: unknown[] }).deals)
+        : [];
+    return rows.map((row) => this.mapDeal(row as Record<string, unknown>));
+  }
+
   /** Pending limit/stop orders on the platform account for this trader. */
   async findUserPendingOrders(
     account: MetaApiAccount,
@@ -1632,10 +1709,12 @@ export class MetaApiService {
     positionId: string,
   ): Promise<MetaApiTradeResult> {
     const ready = await this.ensureAccountReady(account.id);
-    return this.submitTrade(ready, {
+    const result = await this.submitTrade(ready, {
       actionType: 'POSITION_CLOSE_ID',
       positionId,
     });
+    this.terminalSnapshotCache.delete(this.snapshotCacheKey('history', account.id));
+    return result;
   }
 
   async closePositionPartialById(
