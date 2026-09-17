@@ -284,8 +284,8 @@ export default function TermsPage() {
       </div>
 
       <p className="mt-12 text-center text-sm text-gray-500">
-        <Link href="/register" className="text-primary hover:underline">
-          Back to register
+        <Link href="/login" className="text-primary hover:underline">
+          Sign in
         </Link>
         {" · "}
         <Link href="/wallet" className="text-primary hover:underline">
