@@ -9,7 +9,6 @@ import {
   Play,
   Plus,
   Star,
-  Zap,
 } from "lucide-react";
 import { api, type UserMt5Trade } from "@/lib/api";
 import { AuthLoadingScreen, useRequireAuth } from "@/hooks/use-require-auth";
@@ -188,19 +187,6 @@ export default function SoloMt5Page() {
               Pause
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => {
-              if (!linked) setConnectOpen(true);
-            }}
-            className="inline-flex items-center gap-1.5 rounded-full bg-success px-4 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-success/90"
-          >
-            <Zap className="h-3.5 w-3.5" />
-            Trade
-          </button>
-          <span className="hidden items-center rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-white sm:inline-flex">
-            Pre-Market Routine 0/3
-          </span>
         </div>
       </header>
 
