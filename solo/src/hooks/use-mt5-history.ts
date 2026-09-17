@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type UserMt5HistoryItem } from "@/lib/api";
 import {
   readMt5HistoryCache,
@@ -9,12 +9,22 @@ import {
 import { useMetaApiLive } from "@/hooks/use-metaapi-live";
 
 const POLL_MS = 45_000;
+const HISTORY_LIMIT = 10;
+
+function isLocalToday(iso: string) {
+  const t = new Date(iso);
+  if (Number.isNaN(t.getTime())) return false;
+  const now = new Date();
+  return (
+    t.getFullYear() === now.getFullYear() &&
+    t.getMonth() === now.getMonth() &&
+    t.getDate() === now.getDate()
+  );
+}
 
 export function useMt5History(userId: string | undefined, linked: boolean) {
   const { live } = useMetaApiLive();
   const [items, setItems] = useState<UserMt5HistoryItem[]>([]);
-  const [dayPnl, setDayPnl] = useState(0);
-  const [dealCount, setDealCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,8 +41,6 @@ export function useMt5History(userId: string | undefined, linked: boolean) {
       setError(null);
       try {
         const res = await api.signals.mt5History(opts?.fresh);
-        setDealCount(res.dealCount ?? res.items.length);
-        if (typeof res.dayPnl === "number") setDayPnl(res.dayPnl);
         if (res.message && res.items.length === 0) {
           setError(res.message);
           return;
@@ -65,5 +73,27 @@ export function useMt5History(userId: string | undefined, linked: boolean) {
     return () => window.clearInterval(id);
   }, [linked, userId, live, load]);
 
-  return { items, loading, error, load, dayPnl, dealCount };
+  const todaysItems = useMemo(
+    () => items.filter((row) => isLocalToday(row.closedAt)),
+    [items],
+  );
+
+  const visibleItems = useMemo(
+    () => todaysItems.slice(0, HISTORY_LIMIT),
+    [todaysItems],
+  );
+
+  const dayPnl = useMemo(
+    () => todaysItems.reduce((sum, row) => sum + (row.pnl ?? 0), 0),
+    [todaysItems],
+  );
+
+  return {
+    items: visibleItems,
+    loading,
+    error,
+    load,
+    dayPnl,
+    dealCount: todaysItems.length,
+  };
 }

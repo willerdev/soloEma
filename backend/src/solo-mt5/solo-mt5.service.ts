@@ -787,7 +787,7 @@ export class SoloMt5Service {
     let deals: MetaApiDeal[] = [];
     try {
       deals = await this.metaApi.getHistoryDeals(ctx.account, {
-        days: 90,
+        days: 2,
         fresh,
       });
     } catch (err) {
@@ -803,7 +803,7 @@ export class SoloMt5Service {
         message: err instanceof Error ? err.message : 'Could not load history',
       };
     }
-    const items = this.mapClosedDeals(deals).slice(0, 200);
+    const items = this.mapClosedDeals(deals);
     this.logger.log(
       `Solo MT5 history deals=${deals.length} closed=${items.length}`,
     );
