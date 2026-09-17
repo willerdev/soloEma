@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import type { RealtimeQuote } from "@/components/charts/chart-data.service";
+import { useMetaApiLive } from "@/hooks/use-metaapi-live";
 
 const ACTIVE_SYMBOL_MS = 2500;
 const WATCHLIST_MS = 10000;
@@ -40,6 +41,7 @@ function quoteMatchesSymbol(quote: RealtimeQuote | null, symbol: string): boolea
  * otherwise falls back to per-symbol mt5/quote.
  */
 export function useChartLiveQuotes(selectedSymbol: string, watchlist: string[]) {
+  const { live } = useMetaApiLive();
   const [watchlistQuotes, setWatchlistQuotes] = useState<
     Record<string, RealtimeQuote>
   >({});
@@ -59,7 +61,10 @@ export function useChartLiveQuotes(selectedSymbol: string, watchlist: string[]) 
     selectedSymbolRef.current = selectedSymbol;
     activeQuoteRef.current = null;
     setActiveQuote(null);
+  }, [selectedSymbol]);
 
+  useEffect(() => {
+    if (!live || !selectedSymbol) return;
     let cancelled = false;
 
     async function pollActive() {
@@ -81,7 +86,7 @@ export function useChartLiveQuotes(selectedSymbol: string, watchlist: string[]) 
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [selectedSymbol]);
+  }, [selectedSymbol, live]);
 
   useEffect(() => {
     const symbols = [...new Set(watchlist.filter((s) => s && s !== selectedSymbol))];
@@ -138,13 +143,15 @@ export function useChartLiveQuotes(selectedSymbol: string, watchlist: string[]) 
       await pollFallback();
     }
 
+    if (!live) return;
+
     void pollBatch();
     const id = window.setInterval(() => void pollBatch(), WATCHLIST_MS);
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [watchlist, selectedSymbol]);
+  }, [watchlist, selectedSymbol, live]);
 
   const liveQuote = quoteMatchesSymbol(activeQuote, selectedSymbol)
     ? activeQuote

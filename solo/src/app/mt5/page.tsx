@@ -5,6 +5,8 @@ import {
   Bell,
   ClipboardList,
   Loader2,
+  Pause,
+  Play,
   Plus,
   Star,
   Zap,
@@ -21,6 +23,7 @@ import { Mt5PlaceOrderModal } from "@/components/mt5/mt5-place-order-modal";
 import { pickDefaultChartSymbol } from "@/lib/chart-market-status";
 import { useChartWatchlist } from "@/components/charts/use-chart-watchlist";
 import { usePriceAlertMonitor } from "@/hooks/use-price-alert-monitor";
+import { useMetaApiLive } from "@/hooks/use-metaapi-live";
 import { cn } from "@/lib/utils";
 
 type RightTab = "watchlist" | "alerts" | "plan";
@@ -36,6 +39,7 @@ export default function SoloMt5Page() {
   const [orderModal, setOrderModal] = useState<"BUY" | "SELL" | null>(null);
   const [lotSize, setLotSize] = useState("0.01");
   const { watchlist, addSymbol } = useChartWatchlist();
+  const { live, manualPaused, pageActive, setPaused } = useMetaApiLive();
 
   const {
     data,
@@ -127,6 +131,34 @@ export default function SoloMt5Page() {
           Trading
         </h1>
         <div className="ml-auto flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPaused(!manualPaused)}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold",
+              live
+                ? "border border-border bg-surface text-muted hover:text-foreground"
+                : "bg-amber-500/20 text-amber-200 hover:bg-amber-500/30",
+            )}
+            title={
+              live
+                ? "Pause MetaAPI while this tab is open"
+                : pageActive
+                  ? "Resume MetaAPI quotes"
+                  : "MetaAPI is paused while this tab is in the background"
+            }
+          >
+            {live ? (
+              <Pause className="h-3.5 w-3.5" />
+            ) : (
+              <Play className="h-3.5 w-3.5" />
+            )}
+            {live
+              ? "Pause MetaAPI"
+              : manualPaused
+                ? "MetaAPI paused"
+                : "MetaAPI idle"}
+          </button>
           <button
             type="button"
             onClick={() => {

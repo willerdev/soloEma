@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { useMetaApiLive } from "@/hooks/use-metaapi-live";
 import {
   CHART_TOOLS_EVENT,
   addChartAlert,
@@ -25,6 +26,8 @@ export type PriceAlertToast = {
 };
 
 export function usePriceAlertMonitor(enabled: boolean) {
+  const { live } = useMetaApiLive();
+  const polling = enabled && live;
   const [alerts, setAlerts] = useState<ChartPriceAlert[]>([]);
   const [toasts, setToasts] = useState<PriceAlertToast[]>([]);
   const [lastPrices, setLastPrices] = useState<Record<string, number>>({});
@@ -65,7 +68,7 @@ export function usePriceAlertMonitor(enabled: boolean) {
   }, []);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!polling) return;
 
     let cancelled = false;
 
@@ -118,7 +121,7 @@ export function usePriceAlertMonitor(enabled: boolean) {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [enabled, pendingCount]);
+  }, [polling, pendingCount]);
 
   return {
     alerts,

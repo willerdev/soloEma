@@ -3,6 +3,7 @@ import { MAX_HISTORICAL_BARS } from "@/components/charts/chart-types";
 import { roundPriceForSymbol, defaultMidForSymbol } from "@/components/charts/chart-price-format";
 import { writeChartBarCache } from "@/lib/chart-bar-cache";
 import { api } from "@/lib/api";
+import { isMetaApiLive, subscribeMetaApiLive } from "@/lib/metaapi-live";
 
 export { defaultMidForSymbol };
 
@@ -396,7 +397,7 @@ export function subscribeRealtimeUpdates(
 
   /** Refresh recent candles after tab sleep or drift — replaces tail via onResync. */
   const resyncRecentBarsFromApi = async () => {
-    if (!canRun()) return;
+    if (!canRun() || !isMetaApiLive()) return;
     resyncing = true;
     try {
       const res = await api.signals.mt5Ohlc(symbol, timeframe, VISIBILITY_RESYNC_LIMIT);
@@ -415,7 +416,7 @@ export function subscribeRealtimeUpdates(
 
   /** Refresh only the latest closed + forming bars — never replace full history. */
   const syncLastBarsFromApi = async () => {
-    if (!canRun() || tabHidden) return;
+    if (!canRun() || tabHidden || !isMetaApiLive()) return;
     try {
       const res = await api.signals.mt5Ohlc(symbol, timeframe, 2);
       const bars = sanitizeOhlcBars(symbol, res.bars);
@@ -430,7 +431,7 @@ export function subscribeRealtimeUpdates(
   };
 
   const tick = () => {
-    if (!canRun() || tabHidden || resyncing) return;
+    if (!canRun() || tabHidden || resyncing || !isMetaApiLive()) return;
     const quote = getQuote();
     if (quote?.symbol && quote.symbol.toUpperCase() !== symbol.toUpperCase()) return;
     const mid = quoteMid(quote);
@@ -447,10 +448,19 @@ export function subscribeRealtimeUpdates(
   const onVisibilityChange = () => {
     const wasHidden = tabHidden;
     tabHidden = document.hidden;
-    if (wasHidden && !tabHidden) {
+    if (wasHidden && !tabHidden && isMetaApiLive()) {
       void resyncRecentBarsFromApi();
     }
   };
+
+  let wasLive = isMetaApiLive() && !document.hidden;
+  const unsubLive = subscribeMetaApiLive(() => {
+    const nowLive = isMetaApiLive() && !document.hidden;
+    if (nowLive && !wasLive) {
+      void resyncRecentBarsFromApi();
+    }
+    wasLive = nowLive;
+  });
 
   const tickId = window.setInterval(tick, options?.tickMs ?? 400);
   const syncId = window.setInterval(() => void syncLastBarsFromApi(), 15_000);
@@ -461,5 +471,6 @@ export function subscribeRealtimeUpdates(
     window.clearInterval(tickId);
     window.clearInterval(syncId);
     document.removeEventListener("visibilitychange", onVisibilityChange);
+    unsubLive();
   };
 }

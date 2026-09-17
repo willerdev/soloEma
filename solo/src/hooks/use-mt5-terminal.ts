@@ -8,6 +8,7 @@ import {
   runningFromTerminal,
   writeMt5Cache,
 } from "@/lib/mt5-cache";
+import { useMetaApiLive } from "@/hooks/use-metaapi-live";
 
 type Tab = "quotes" | "chart" | "trades" | "history" | "setups";
 
@@ -23,6 +24,7 @@ export function useMt5Terminal(
   tab: Tab,
   accessGranted = true,
 ) {
+  const { live } = useMetaApiLive();
   const [data, setData] = useState<UserMt5Terminal | null>(null);
   const [runningTrades, setRunningTrades] = useState<UserMt5Trade[]>([]);
   const [quotes, setQuotes] = useState<UserMt5QuoteItem[]>([]);
@@ -159,7 +161,7 @@ export function useMt5Terminal(
   }, []);
 
   useEffect(() => {
-    if (!canLoad || (tab !== "trades" && tab !== "chart")) return;
+    if (!canLoad || !live || (tab !== "trades" && tab !== "chart")) return;
     const start = window.setTimeout(() => {
       void loadRunning();
     }, 2500);
@@ -168,10 +170,10 @@ export function useMt5Terminal(
       window.clearTimeout(start);
       window.clearInterval(id);
     };
-  }, [canLoad, tab, loadRunning]);
+  }, [canLoad, live, tab, loadRunning]);
 
   useEffect(() => {
-    if (!canLoad || (tab !== "quotes" && tab !== "chart")) return;
+    if (!canLoad || !live || (tab !== "quotes" && tab !== "chart")) return;
     const start = window.setTimeout(() => {
       void loadQuotes();
     }, 4000);
@@ -180,13 +182,13 @@ export function useMt5Terminal(
       window.clearTimeout(start);
       window.clearInterval(id);
     };
-  }, [canLoad, tab, loadQuotes]);
+  }, [canLoad, live, tab, loadQuotes]);
 
   useEffect(() => {
-    if (!canLoad || tab !== "chart") return;
+    if (!canLoad || !live || tab !== "chart") return;
     const id = window.setInterval(() => void load({ background: true }), 20000);
     return () => window.clearInterval(id);
-  }, [canLoad, tab, load]);
+  }, [canLoad, live, tab, load]);
 
   return {
     data,
