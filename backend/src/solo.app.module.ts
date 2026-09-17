@@ -17,6 +17,7 @@ import { FlutterwaveModule } from './flutterwave/flutterwave.module';
 import { FxModule } from './fx/fx.module';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { DerivModule } from './deriv/deriv.module';
+import { SoloMt5Module } from './solo-mt5/solo-mt5.module';
 import { SoloPlatformModule } from './platform/solo-platform.module';
 import { HealthController } from './health/health.controller';
 import { markSoloApp } from './common/app-variant';
@@ -47,6 +48,7 @@ markSoloApp();
     FlutterwaveModule,
     BlockchainModule,
     DerivModule,
+    SoloMt5Module,
     SoloPlatformModule,
   ],
   controllers: [HealthController],

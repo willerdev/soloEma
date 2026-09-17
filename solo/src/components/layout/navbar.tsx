@@ -26,6 +26,7 @@ import {
   ShieldCheck,
   Clock,
   LineChart,
+  CandlestickChart,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth";
@@ -103,6 +104,13 @@ const NAV_GROUPS: NavGroup[] = [
         shortLabel: "Deriv",
         icon: LineChart,
         keywords: "mt5 token trades transfer",
+      },
+      {
+        href: "/mt5",
+        label: "Charts",
+        shortLabel: "Charts",
+        icon: CandlestickChart,
+        keywords: "mt5 chart live trades metaapi",
       },
     ],
   },

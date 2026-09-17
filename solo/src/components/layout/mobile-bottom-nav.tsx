@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Blocks, Home, MoreHorizontal, PiggyBank, TrendingUp } from "lucide-react";
+import { CandlestickChart, Home, MoreHorizontal, PiggyBank, TrendingUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 function pathActive(pathname: string, href: string) {
@@ -77,8 +77,9 @@ export function MobileBottomNav({
   const investActive = pathActive(pathname, "/invest");
   const walletActive = pathActive(pathname, "/wallet");
   const chainActive = pathActive(pathname, "/blockchain");
+  const chartsActive = pathActive(pathname, "/mt5");
   const moreActive =
-    !homeActive && !investActive && !walletActive && !chainActive;
+    !homeActive && !investActive && !walletActive && !chainActive && !chartsActive;
 
   return (
     <nav
@@ -93,7 +94,7 @@ export function MobileBottomNav({
         <NavTab href="/dashboard" label="Home" icon={Home} active={homeActive} />
         <NavTab href="/invest" label="Invest" icon={TrendingUp} active={investActive} emphasize />
         <NavTab href="/wallet" label="Wallet" icon={PiggyBank} active={walletActive} />
-        <NavTab href="/blockchain" label="Contract" icon={Blocks} active={chainActive} />
+        <NavTab href="/mt5" label="Charts" icon={CandlestickChart} active={chartsActive} />
         <NavTab
           label="More"
           icon={MoreHorizontal}
