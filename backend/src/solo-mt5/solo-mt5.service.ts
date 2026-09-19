@@ -690,6 +690,7 @@ export class SoloMt5Service {
       volume: dto.volume ?? 0.01,
       stopLoss: dto.stopLoss,
       takeProfit: dto.takeProfit,
+      comment: 'SOLO Expert',
     });
     return {
       status: 'placed',
