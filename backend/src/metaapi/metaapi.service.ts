@@ -1447,18 +1447,32 @@ export class MetaApiService {
     };
   }
 
-  private tradeExtras(account: MetaApiAccount): Record<string, unknown> {
+  private tradeExtras(
+    account: MetaApiAccount,
+    actionType: string,
+  ): Record<string, unknown> {
     const extras: Record<string, unknown> = {};
+    const orderActions = new Set([
+      'ORDER_TYPE_BUY',
+      'ORDER_TYPE_SELL',
+      'ORDER_TYPE_BUY_LIMIT',
+      'ORDER_TYPE_SELL_LIMIT',
+      'ORDER_TYPE_BUY_STOP',
+      'ORDER_TYPE_SELL_STOP',
+      'ORDER_TYPE_BUY_STOP_LIMIT',
+      'ORDER_TYPE_SELL_STOP_LIMIT',
+    ]);
+    // MetaAPI rejects `magic` on modify/close/cancel ("magic: Unexpected value").
+    if (!orderActions.has(actionType)) {
+      return extras;
+    }
     const server = account.server?.toLowerCase() ?? '';
     const isDeriv = server.includes('deriv');
-    if (
-      isDeriv ||
-      account.manualTrades === true ||
-      account.magic === 0
-    ) {
+    const magic = Number(account.magic);
+    if (isDeriv || account.manualTrades === true || magic === 0) {
       extras.magic = 0;
-    } else if (account.magic != null) {
-      extras.magic = account.magic;
+    } else if (Number.isInteger(magic) && magic > 0) {
+      extras.magic = magic;
     }
     return extras;
   }
@@ -1545,7 +1559,10 @@ export class MetaApiService {
       {
         method: 'POST',
         headers: this.headers(true),
-        body: JSON.stringify({ ...this.tradeExtras(account), ...bodyPayload }),
+        body: JSON.stringify({
+          ...this.tradeExtras(account, String(bodyPayload.actionType ?? '')),
+          ...bodyPayload,
+        }),
       },
     );
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
