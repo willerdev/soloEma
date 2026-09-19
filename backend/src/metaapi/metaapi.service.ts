@@ -168,6 +168,9 @@ export type MetaApiSymbolSpec = {
   maxVolume: number;
   volumeStep: number;
   digits?: number;
+  /** Broker minimum SL/TP distance from current price, in points. */
+  stopsLevel?: number;
+  freezeLevel?: number;
 };
 
 export type MetaApiTradeResult = {
@@ -1437,6 +1440,10 @@ export class MetaApiService {
       maxVolume: Number(body.maxVolume ?? 100),
       volumeStep: Number(body.volumeStep ?? 0.01),
       digits: body.digits != null ? Number(body.digits) : undefined,
+      stopsLevel: Number(
+        body.stopsLevel ?? body.stopLevel ?? body.tradeStopsLevel ?? 0,
+      ),
+      freezeLevel: Number(body.freezeLevel ?? 0),
     };
   }
 
@@ -1555,8 +1562,16 @@ export class MetaApiService {
       );
     }
 
-    const stringCode = String(body.stringCode ?? '');
-    if (stringCode && stringCode !== 'TRADE_RETCODE_DONE') {
+    const stringCode = String(body.stringCode ?? body.numericCode ?? '');
+    const okCodes = new Set([
+      'TRADE_RETCODE_DONE',
+      'TRADE_RETCODE_DONE_PARTIAL',
+      'TRADE_RETCODE_NO_CHANGES',
+      '10009',
+      '10008',
+      '10025',
+    ]);
+    if (stringCode && !okCodes.has(stringCode)) {
       this.raiseBrokerError(
         `${stringCode}: ${String(body.message ?? '')}`,
         'trade execution',

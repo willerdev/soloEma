@@ -20,8 +20,13 @@ import {
   MetaApiOrder,
   MetaApiPosition,
   MetaApiService,
+  MetaApiSymbolSpec,
 } from '../metaapi/metaapi.service';
 import { roundToSymbolDigits } from '../metaapi/metaapi-order.util';
+import {
+  classifyBrokerError,
+  humanizeBrokerError,
+} from '../common/broker-error.util';
 import { normalizeDerivSymbol } from '../ai/deriv-symbols';
 import { computeOneToOnePrice } from '../common/rr.util';
 import {
@@ -40,6 +45,30 @@ function normalizeChartSymbol(raw: string): string {
 
 function isSellType(type: string): boolean {
   return type.toLowerCase().includes('sell');
+}
+
+function brokerMinStopDistance(spec: MetaApiSymbolSpec): number {
+  const digits = spec.digits ?? 5;
+  const tick = spec.tickSize > 0 ? spec.tickSize : 10 ** -digits;
+  const points = Math.max(spec.stopsLevel ?? 0, spec.freezeLevel ?? 0, 0);
+  return Math.max(points * tick, tick);
+}
+
+function formatStopDistance(
+  priceDist: number,
+  spec: MetaApiSymbolSpec,
+  symbol: string,
+): string {
+  const digits = spec.digits ?? 5;
+  const tick = spec.tickSize > 0 ? spec.tickSize : 10 ** -digits;
+  const points = priceDist / tick;
+  const pipSize = getPipSize(symbol);
+  const pips = pipSize > 0 ? priceDist / pipSize : 0;
+  const price = priceDist.toFixed(Math.min(digits, 5));
+  if (pipSize >= tick * 5) {
+    return `${price} (${points.toFixed(0)} points / ~${pips.toFixed(1)} pips)`;
+  }
+  return `${price} (${points.toFixed(0)} points)`;
 }
 
 @Injectable()
@@ -854,6 +883,25 @@ export class SoloMt5Service {
     };
   }
 
+  private breakevenBlockedMessage(
+    pos: MetaApiPosition,
+    spec: MetaApiSymbolSpec,
+    be: number,
+    mark: number,
+    profitDistance: number,
+  ): string {
+    const minDist = brokerMinStopDistance(spec);
+    const sell = isSellType(pos.type);
+    const stopPoints = Math.max(spec.stopsLevel ?? 0, spec.freezeLevel ?? 0, 1);
+    const needed = formatStopDistance(minDist, spec, pos.symbol);
+    const have = formatStopDistance(Math.max(0, profitDistance), spec, pos.symbol);
+    const markLabel = sell ? 'ask' : 'bid';
+    if (profitDistance <= 0) {
+      return `Cannot set breakeven yet — this ${sell ? 'SELL' : 'BUY'} is not far enough in profit. The broker will not place stop loss at entry (${be}) while price (${markLabel} ${mark}) is at or against entry. Price must first move at least ${needed} in profit.`;
+    }
+    return `Cannot set breakeven yet — broker stop level is ${stopPoints} points. Stop loss at entry (${be}) must stay at least ${needed} away from the current ${markLabel} (${mark}). This trade has only moved ${have}. Wait until price is further in profit, then try Set B.E. again.`;
+  }
+
   private async loadSetBreakeven(userId: string, positionId: string) {
     const ctx = await this.requireAccount(userId);
     const positions = await this.metaApi.getPositions(ctx.account);
@@ -879,12 +927,44 @@ export class SoloMt5Service {
         message: 'Stop loss is already at breakeven',
       };
     }
-    await this.metaApi.modifyPositionStops(ctx.account, {
-      positionId,
-      stopLoss: be,
-      takeProfit: pos.takeProfit,
-      specDigits: digits,
-    });
+
+    const live = await this.metaApi.getSymbolPrice(ctx.account, pos.symbol);
+    const sell = isSellType(pos.type);
+    const mark = sell ? live.ask : live.bid;
+    const profitDistance = sell ? be - mark : mark - be;
+    const minDist = brokerMinStopDistance(spec);
+    if (profitDistance + tick / 2 < minDist) {
+      throw new BadRequestException(
+        this.breakevenBlockedMessage(pos, spec, be, mark, profitDistance),
+      );
+    }
+
+    try {
+      await this.metaApi.modifyPositionStops(ctx.account, {
+        positionId,
+        stopLoss: be,
+        takeProfit: pos.takeProfit,
+        specDigits: digits,
+      });
+    } catch (err) {
+      const raw =
+        err instanceof BadRequestException
+          ? Array.isArray(err.message)
+            ? err.message.join(' ')
+            : String(err.message)
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      if (classifyBrokerError(raw) === 'invalid_stops') {
+        throw new BadRequestException(
+          this.breakevenBlockedMessage(pos, spec, be, mark, profitDistance),
+        );
+      }
+      throw err instanceof BadRequestException
+        ? err
+        : new BadRequestException(humanizeBrokerError(raw));
+    }
+
     return {
       ok: true,
       positionId,
