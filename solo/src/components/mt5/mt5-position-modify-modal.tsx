@@ -248,15 +248,18 @@ export function Mt5PositionModifyModal({
                   closeVolume <= 0
                 }
                 onClick={() =>
-                  void run("partial", async () => {
-                    if (closeVolume >= openVolume - 1e-8) {
-                      await api.signals.closeMt5Position(id);
-                      return;
-                    }
-                    await api.signals.partialCloseMt5Position(id, {
-                      volume: closeVolume,
-                    });
-                  })
+                  void run(
+                    "partial",
+                    async () => {
+                      if (closeVolume >= openVolume - 1e-8) {
+                        return api.signals.closeMt5Position(id);
+                      }
+                      return api.signals.partialCloseMt5Position(id, {
+                        volume: closeVolume,
+                      });
+                    },
+                    true,
+                  )
                 }
               >
                 {busy === "partial" ? (

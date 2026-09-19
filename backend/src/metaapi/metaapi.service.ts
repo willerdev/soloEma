@@ -1462,7 +1462,7 @@ export class MetaApiService {
       'ORDER_TYPE_BUY_STOP_LIMIT',
       'ORDER_TYPE_SELL_STOP_LIMIT',
     ]);
-    // MetaAPI rejects `magic` on modify/close/cancel ("magic: Unexpected value").
+    // Deriv/MetaAPI reject `magic` on modify, partial, and close.
     if (!orderActions.has(actionType)) {
       return extras;
     }
@@ -1475,6 +1475,131 @@ export class MetaApiService {
       extras.magic = magic;
     }
     return extras;
+  }
+
+  /** Keep only fields MetaAPI allows for this actionType (avoids "X: Unexpected value"). */
+  private sanitizeTradeBody(
+    actionType: string,
+    body: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const allowedByAction: Record<string, string[]> = {
+      ORDER_TYPE_BUY: [
+        'actionType',
+        'symbol',
+        'volume',
+        'stopLoss',
+        'takeProfit',
+        'stopLossUnits',
+        'takeProfitUnits',
+        'comment',
+        'clientId',
+        'magic',
+      ],
+      ORDER_TYPE_SELL: [
+        'actionType',
+        'symbol',
+        'volume',
+        'stopLoss',
+        'takeProfit',
+        'stopLossUnits',
+        'takeProfitUnits',
+        'comment',
+        'clientId',
+        'magic',
+      ],
+      ORDER_TYPE_BUY_LIMIT: [
+        'actionType',
+        'symbol',
+        'volume',
+        'openPrice',
+        'openPriceUnits',
+        'stopLoss',
+        'takeProfit',
+        'stopLossUnits',
+        'takeProfitUnits',
+        'comment',
+        'clientId',
+        'magic',
+      ],
+      ORDER_TYPE_SELL_LIMIT: [
+        'actionType',
+        'symbol',
+        'volume',
+        'openPrice',
+        'openPriceUnits',
+        'stopLoss',
+        'takeProfit',
+        'stopLossUnits',
+        'takeProfitUnits',
+        'comment',
+        'clientId',
+        'magic',
+      ],
+      ORDER_TYPE_BUY_STOP: [
+        'actionType',
+        'symbol',
+        'volume',
+        'openPrice',
+        'openPriceUnits',
+        'stopLoss',
+        'takeProfit',
+        'stopLossUnits',
+        'takeProfitUnits',
+        'comment',
+        'clientId',
+        'magic',
+      ],
+      ORDER_TYPE_SELL_STOP: [
+        'actionType',
+        'symbol',
+        'volume',
+        'openPrice',
+        'openPriceUnits',
+        'stopLoss',
+        'takeProfit',
+        'stopLossUnits',
+        'takeProfitUnits',
+        'comment',
+        'clientId',
+        'magic',
+      ],
+      POSITION_MODIFY: [
+        'actionType',
+        'positionId',
+        'stopLoss',
+        'takeProfit',
+        'stopLossUnits',
+        'takeProfitUnits',
+      ],
+      POSITION_PARTIAL: ['actionType', 'positionId', 'volume'],
+      POSITION_CLOSE_ID: ['actionType', 'positionId'],
+      ORDER_MODIFY: [
+        'actionType',
+        'orderId',
+        'openPrice',
+        'openPriceUnits',
+        'stopLoss',
+        'takeProfit',
+        'stopLossUnits',
+        'takeProfitUnits',
+      ],
+      ORDER_CANCEL: ['actionType', 'orderId'],
+    };
+    const allowed = allowedByAction[actionType];
+    if (!allowed) {
+      const rest = { ...body };
+      delete rest.magic;
+      rest.actionType = actionType;
+      return rest;
+    }
+    const out: Record<string, unknown> = {};
+    for (const key of allowed) {
+      if (body[key] !== undefined && body[key] !== null) {
+        out[key] = body[key];
+      }
+    }
+    out.actionType = actionType;
+    return out;
   }
 
   private formatMetaApiError(
@@ -1504,6 +1629,10 @@ export class MetaApiService {
     const out: Record<string, unknown> = { ...payload };
     const actionType = String(out.actionType ?? '');
 
+    if (typeof out.volume === 'number' && Number.isFinite(out.volume)) {
+      out.volume = Number((out.volume as number).toFixed(8));
+    }
+
     const supportsStops = [
       'ORDER_TYPE_BUY',
       'ORDER_TYPE_SELL',
@@ -1530,10 +1659,6 @@ export class MetaApiService {
       }
     }
 
-    if (typeof out.volume === 'number' && Number.isFinite(out.volume)) {
-      out.volume = Number((out.volume as number).toFixed(8));
-    }
-
     if (out.stopLoss != null) {
       out.stopLossUnits = 'ABSOLUTE_PRICE';
     }
@@ -1554,15 +1679,17 @@ export class MetaApiService {
   ): Promise<MetaApiTradeResult> {
     const base = this.clientUrl(account.region);
     const bodyPayload = this.normalizeTradePayload(payload, options?.digits);
+    const actionType = String(bodyPayload.actionType ?? '');
+    const tradeBody = this.sanitizeTradeBody(actionType, {
+      ...this.tradeExtras(account, actionType),
+      ...bodyPayload,
+    });
     const res = await fetch(
       `${base}/users/current/accounts/${encodeURIComponent(account.id)}/trade`,
       {
         method: 'POST',
         headers: this.headers(true),
-        body: JSON.stringify({
-          ...this.tradeExtras(account, String(bodyPayload.actionType ?? '')),
-          ...bodyPayload,
-        }),
+        body: JSON.stringify(tradeBody),
       },
     );
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -1906,7 +2033,7 @@ export class MetaApiService {
   ): Promise<MetaApiTradeResult> {
     const ready = await this.ensureAccountReady(account.id);
     const result = await this.submitTrade(ready, {
-      actionType: 'POSITION_CLOSE_ID',
+      actionType: 'POSITION_PARTIAL',
       positionId,
       volume,
     });
