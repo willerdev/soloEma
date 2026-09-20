@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { TradeDirection } from '@prisma/client';
@@ -13,7 +14,14 @@ import {
   decryptCredential,
   encryptCredential,
 } from '../common/credential-crypto.util';
-import { ConfigService } from '@nestjs/config';
+import { DerivService } from '../deriv/deriv.service';
+import {
+  allocatedDepositUsdt,
+  computeAllocatedRemaining,
+  isSharedLiveBook,
+  isSoloAllocatedTraderEmail,
+  roundAllocatedUsdt,
+} from '../common/solo-allocated-trader.util';
 import {
   MetaApiAccount,
   MetaApiDeal,
@@ -79,6 +87,7 @@ export class SoloMt5Service {
     private prisma: PrismaService,
     private metaApi: MetaApiService,
     private config: ConfigService,
+    @Optional() private deriv?: DerivService,
   ) {}
 
   private cryptoSecret() {
@@ -121,6 +130,135 @@ export class SoloMt5Service {
     const token = await this.decryptCloudToken(userId);
     if (token) return this.metaApi.runWithToken(token, fn);
     return fn();
+  }
+
+  private async isAllocatedTrader(userId: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    return isSoloAllocatedTraderEmail(user?.email);
+  }
+
+  /**
+   * Emma’s book: $500 deposit minus live Deriv/MetaAPI balance minus profits.
+   * Shared admin books ignore raw broker equity (too large) and subtract P/L only.
+   */
+  async allocatedBook(userId: string): Promise<{
+    deposit: number;
+    liveTradingBalance: number;
+    profitsMade: number;
+    remaining: number;
+    dedicatedLive: boolean;
+    source: 'metaapi' | 'deriv' | 'pnl';
+    currency: string;
+  } | null> {
+    if (!(await this.isAllocatedTrader(userId))) return null;
+    return this.withCloud(userId, () => this.loadAllocatedBook(userId));
+  }
+
+  async allocatedWalletAvailable(
+    userId: string,
+    ledgerAvailable: number,
+  ): Promise<number | null> {
+    const book = await this.allocatedBook(userId);
+    if (!book?.dedicatedLive) return null;
+    const outside = roundAllocatedUsdt(
+      Math.max(0, ledgerAvailable - book.deposit),
+    );
+    return roundAllocatedUsdt(outside + book.remaining);
+  }
+
+  private async loadAllocatedBook(userId: string) {
+    if (!(await this.isAllocatedTrader(userId))) return null;
+    const deposit = allocatedDepositUsdt();
+    let mt5Balance = 0;
+    let mt5Equity = 0;
+    let floating = 0;
+    let currency = 'USD';
+    try {
+      const ctx = await this.readyAccountOrNull(userId);
+      if (ctx) {
+        const [information, positions] = await Promise.all([
+          this.metaApi.getAccountInformation(ctx.account),
+          this.metaApi.getPositions(ctx.account),
+        ]);
+        mt5Balance = Number(information.balance ?? 0);
+        mt5Equity = Number(information.equity ?? mt5Balance);
+        currency = information.currency || 'USD';
+        floating = positions.reduce(
+          (sum, p) =>
+            sum + Number(p.unrealizedProfit || p.profit || 0),
+          0,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Allocated MetaAPI book failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+
+    let derivBalance = 0;
+    if (this.deriv && mt5Equity <= 0) {
+      derivBalance = await this.deriv.tradingUsdBalance(userId);
+    }
+
+    const liveEquity = mt5Equity > 0 ? mt5Equity : derivBalance;
+    const dedicatedLive = liveEquity > 0 && !isSharedLiveBook(liveEquity, deposit);
+    let liveTradingBalance = 0;
+    let profitsMade = 0;
+    let source: 'metaapi' | 'deriv' | 'pnl' = 'pnl';
+
+    if (dedicatedLive) {
+      liveTradingBalance = mt5Equity > 0 ? mt5Balance : derivBalance;
+      profitsMade = mt5Equity > 0 ? floating : 0;
+      source = mt5Equity > 0 ? 'metaapi' : 'deriv';
+    } else {
+      profitsMade = roundAllocatedUsdt(floating);
+      source = 'pnl';
+    }
+
+    const remaining = computeAllocatedRemaining({
+      deposit,
+      liveTradingBalance,
+      profitsMade,
+    });
+
+    return {
+      deposit,
+      liveTradingBalance: roundAllocatedUsdt(liveTradingBalance),
+      profitsMade: roundAllocatedUsdt(profitsMade),
+      remaining,
+      dedicatedLive,
+      source,
+      currency,
+    };
+  }
+
+  private applyAllocatedAccount<T extends {
+    startingBalance: number;
+    realizedProfit: number;
+    floatingProfit: number;
+    totalProfit: number;
+    equity: number;
+    currency: string;
+  }>(
+    account: T,
+    book: {
+      remaining: number;
+      profitsMade: number;
+      currency: string;
+    },
+  ): T {
+    return {
+      ...account,
+      startingBalance: book.remaining,
+      realizedProfit: 0,
+      floatingProfit: book.profitsMade,
+      totalProfit: book.profitsMade,
+      equity: book.remaining,
+      currency: book.currency || account.currency,
+    };
   }
 
   async cloudStatus(userId: string) {
@@ -308,27 +446,35 @@ export class SoloMt5Service {
       const trades = [...running, ...limits];
       const floatingProfit = running.reduce((sum, t) => sum + (t.profit ?? 0), 0);
       const startingBalance = information.balance - floatingProfit;
-
-      return {
-        configured: true,
-        accountSource: 'linked_live' as const,
-        account: {
+      const rawAccount = {
           startingBalance,
           currency: information.currency || 'USD',
           realizedProfit: 0,
           floatingProfit,
           totalProfit: floatingProfit,
           equity: information.equity,
-        },
+        };
+      const book = await this.loadAllocatedBook(userId);
+      const displayAccount = book
+        ? this.applyAllocatedAccount(rawAccount, book)
+        : rawAccount;
+
+      return {
+        configured: true,
+        accountSource: 'linked_live' as const,
+        account: displayAccount,
         investor: {
-          investmentDeposited: 0,
-          investmentBalance: 0,
+          investmentDeposited: book?.deposit ?? 0,
+          investmentBalance: book?.remaining ?? 0,
           enrollmentPaid: 0,
-          walletDeposited: 0,
+          walletDeposited: book?.deposit ?? 0,
           walletBalance: 0,
           mt5Balance: information.balance,
           mt5Equity: information.equity,
           currency: information.currency || 'USD',
+          allocatedDeposit: book?.deposit ?? null,
+          liveTradingBalance: book?.liveTradingBalance ?? null,
+          profitsMade: book?.profitsMade ?? null,
         },
         setups: { items: [], count: 0, claimableCount: 0 },
         trades,
@@ -539,17 +685,21 @@ export class SoloMt5Service {
     ]);
     const trades = positions.map((p) => this.mapPosition(p));
     const floatingProfit = trades.reduce((sum, t) => sum + (t.profit ?? 0), 0);
-    return {
-      trades,
-      accountSource: 'linked_live' as const,
-      account: {
+    const rawAccount = {
         startingBalance: information.balance - floatingProfit,
         currency: information.currency || 'USD',
         realizedProfit: 0,
         floatingProfit,
         totalProfit: floatingProfit,
         equity: information.equity,
-      },
+      };
+    const book = await this.loadAllocatedBook(userId);
+    return {
+      trades,
+      accountSource: 'linked_live' as const,
+      account: book
+        ? this.applyAllocatedAccount(rawAccount, book)
+        : rawAccount,
       stats: {
         runningCount: trades.length,
         floatingProfit,
@@ -654,6 +804,7 @@ export class SoloMt5Service {
         ? volumeRaw
         : 0.01;
     const info = await this.metaApi.getAccountInformation(ctx.account);
+    const book = await this.loadAllocatedBook(userId);
 
     return {
       symbol,
@@ -669,7 +820,7 @@ export class SoloMt5Service {
         riskPercent: 1,
         riskAmount: Math.abs(entry - stopLoss) * volume,
         estimatedLossAtSl: Math.abs(entry - stopLoss) * volume,
-        accountEquity: info.equity,
+        accountEquity: book?.remaining ?? info.equity,
         currency: info.currency || 'USD',
       },
       refreshedAt: new Date().toISOString(),

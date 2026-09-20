@@ -7,6 +7,7 @@ import { EmailModule } from '../email/email.module';
 import { ComplianceModule } from '../compliance/compliance.module';
 import { FlutterwaveModule } from '../flutterwave/flutterwave.module';
 import { PayoutsModule } from '../payouts/payouts.module';
+import { SoloMt5Module } from '../solo-mt5/solo-mt5.module';
 import { SoloTradingAdminGuard } from '../auth/guards/solo-trading-admin.guard';
 
 @Module({
@@ -16,6 +17,7 @@ import { SoloTradingAdminGuard } from '../auth/guards/solo-trading-admin.guard';
     ComplianceModule,
     forwardRef(() => FlutterwaveModule),
     forwardRef(() => PayoutsModule),
+    forwardRef(() => SoloMt5Module),
   ],
   controllers: [WalletController],
   providers: [WalletService, SavedWithdrawalWalletService, SoloTradingAdminGuard],

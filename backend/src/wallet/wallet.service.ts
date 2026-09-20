@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
   forwardRef,
 } from '@nestjs/common';
@@ -38,6 +39,7 @@ import { BinanceC2cService } from '../fx/binance-c2c.service';
 import { resolvePreferredDisplayCurrency } from '../fx/country-currency.util';
 import { isInvestorVipActive } from '../investor/investor-vip.util';
 import { isSoloApp } from '../common/app-variant';
+import { SoloMt5Service } from '../solo-mt5/solo-mt5.service';
 import { assertSoloCanManageTrades } from '../common/solo-admin.util';
 import {
   isInvestorVvipActive,
@@ -47,6 +49,11 @@ import {
   INSTANT_WITHDRAW_SAFETY_HOLD_ENABLED,
 } from '../investor/instant-withdraw-safety.util';
 import { PayoutService } from '../payouts/payout.service';
+import {
+  isWithdrawMaintenanceActive,
+  maxMaintenanceWithdrawUsdt,
+  WITHDRAW_MAINTENANCE,
+} from './withdraw-maintenance';
 import { randomInt } from 'crypto';
 import * as bcrypt from 'bcrypt';
 
@@ -77,7 +84,29 @@ export class WalletService {
     private binanceC2c: BinanceC2cService,
     @Inject(forwardRef(() => PayoutService))
     private payouts: PayoutService,
+    @Optional()
+    @Inject(forwardRef(() => SoloMt5Service))
+    private soloMt5?: SoloMt5Service,
   ) {}
+
+  private async spendableAvailable(
+    userId: string,
+    ledgerAvailable: number,
+  ): Promise<number> {
+    if (!this.soloMt5) return ledgerAvailable;
+    try {
+      const allocated = await this.soloMt5.allocatedWalletAvailable(
+        userId,
+        ledgerAvailable,
+      );
+      return allocated ?? ledgerAvailable;
+    } catch (err) {
+      this.logger.warn(
+        `Allocated wallet overlay skipped: ${err instanceof Error ? err.message : err}`,
+      );
+      return ledgerAvailable;
+    }
+  }
 
   quoteMomoP2p(amountUsdt: number) {
     return this.binanceC2c.quoteUsdtToUgx(amountUsdt);
@@ -508,18 +537,24 @@ export class WalletService {
     });
     const vvipActive = isInvestorVvipActive(vipUser ?? {});
     const vipActive = isInvestorVipActive(vipUser ?? {}) || vvipActive;
-    const processingFeeUsdt = vipActive
-      ? 0
-      : Number(config?.walletWithdrawalFeeUsdt ?? WALLET_WITHDRAWAL_FEE_USD);
-    const scheduleEnabled = isSoloApp()
-      ? false
-      : config?.withdrawalScheduleEnabled !== false;
+    const maintenance = !isSoloApp() && isWithdrawMaintenanceActive();
+    const processingFeeUsdt =
+      maintenance && WITHDRAW_MAINTENANCE.feesWaived
+        ? 0
+        : vipActive
+          ? 0
+          : Number(config?.walletWithdrawalFeeUsdt ?? WALLET_WITHDRAWAL_FEE_USD);
+    const scheduleEnabled =
+      isSoloApp() || maintenance
+        ? false
+        : config?.withdrawalScheduleEnabled !== false;
     const preferredSchedule = normalizePreferredSchedule(
       config?.withdrawalPreferredSchedule,
     );
-    const offSchedulePenaltyPercent = Number(
-      config?.withdrawalOffSchedulePenaltyPercent ?? 8,
-    );
+    const offSchedulePenaltyPercent =
+      maintenance && WITHDRAW_MAINTENANCE.feesWaived
+        ? 0
+        : Number(config?.withdrawalOffSchedulePenaltyPercent ?? 8);
     const scheduleQuote = quoteWithdrawalFees({
       grossUsdt: 100,
       processingFeeUsdt,
@@ -529,7 +564,10 @@ export class WalletService {
     });
 
     return {
-      availableBalance: Number(wallet.availableBalance),
+      availableBalance: await this.spendableAvailable(
+        userId,
+        Number(wallet.availableBalance),
+      ),
       lockedBalance: Number(wallet.lockedBalance),
       investorBalance: Number(wallet.investorBalance ?? 0),
       unitrustBalance: Number(wallet.unitrustBalance ?? 0),
@@ -550,6 +588,18 @@ export class WalletService {
       withdrawalInPreferredWindow: scheduleQuote.inPreferredWindow,
       withdrawalNextPreferredWindowAt: scheduleQuote.nextPreferredWindowAt,
       withdrawalPreferredWindowLabel: scheduleQuote.preferredWindowLabel,
+      maxWithdrawUsdt: maintenance
+        ? maxMaintenanceWithdrawUsdt(Number(wallet.availableBalance))
+        : Number(wallet.availableBalance),
+      withdrawMaintenance:
+        maintenance
+          ? {
+              maxFraction: WITHDRAW_MAINTENANCE.maxFraction,
+              feesWaived: WITHDRAW_MAINTENANCE.feesWaived,
+              cancelDisabled: WITHDRAW_MAINTENANCE.cancelDisabled,
+              message: WITHDRAW_MAINTENANCE.userMessage,
+            }
+          : null,
       vipActive,
       vvipActive,
       activeLoanWithdraw: await this.getActiveLoanWithdrawGate(userId),
@@ -1370,7 +1420,7 @@ export class WalletService {
 
     const grossAmount = Math.round(amount * 100) / 100;
     await this.assertLoanWithdrawAllowed(userId, grossAmount);
-    await this.assertWithdrawAmountValid(grossAmount, user);
+    await this.assertWithdrawAmountValid(userId, grossAmount, user);
 
     const savedWallet = await this.savedWithdrawalWallets.getForWithdraw(
       userId,
@@ -1378,7 +1428,12 @@ export class WalletService {
     );
 
     const platformWallet = await this.getOrCreateWallet(userId);
-    if (Number(platformWallet.availableBalance) < grossAmount) {
+    if (
+      (await this.spendableAvailable(
+        userId,
+        Number(platformWallet.availableBalance),
+      )) < grossAmount
+    ) {
       throw new BadRequestException('Insufficient available balance');
     }
 
@@ -1458,6 +1513,15 @@ export class WalletService {
     const preferredSchedule = normalizePreferredSchedule(
       config?.withdrawalPreferredSchedule,
     );
+    if (!isSoloApp() && isWithdrawMaintenanceActive()) {
+      return quoteWithdrawalFees({
+        grossUsdt: grossAmount,
+        processingFeeUsdt: 0,
+        scheduleEnabled: false,
+        preferredSchedule,
+        offSchedulePenaltyPercent: 0,
+      });
+    }
     const offSchedulePenaltyPercent = Number(
       config?.withdrawalOffSchedulePenaltyPercent ?? 8,
     );
@@ -1484,6 +1548,7 @@ export class WalletService {
   }
 
   private async assertWithdrawAmountValid(
+    userId: string,
     grossAmount: number,
     vipUser: {
       investorVipActive?: boolean | null;
@@ -1500,6 +1565,17 @@ export class WalletService {
 
     if (grossAmount <= 0) {
       throw new BadRequestException('Withdrawal amount must be positive');
+    }
+    if (!isSoloApp() && isWithdrawMaintenanceActive()) {
+      const wallet = await this.getOrCreateWallet(userId);
+      const maxUsdt = maxMaintenanceWithdrawUsdt(
+        Number(wallet.availableBalance),
+      );
+      if (grossAmount > maxUsdt + 1e-9) {
+        throw new BadRequestException(
+          `During maintenance you can withdraw at most 40% of available funds ($${maxUsdt.toFixed(2)} USDT of $${Number(wallet.availableBalance).toFixed(2)}). This is temporary and fees are waived.`,
+        );
+      }
     }
     if (fee > 0 && grossAmount <= fee) {
       throw new BadRequestException(
@@ -1756,8 +1832,23 @@ export class WalletService {
     );
 
     const platformWallet = await this.getOrCreateWallet(userId);
-    if (Number(platformWallet.availableBalance) < grossAmount) {
+    if (
+      (await this.spendableAvailable(
+        userId,
+        Number(platformWallet.availableBalance),
+      )) < grossAmount
+    ) {
       throw new BadRequestException('Insufficient available balance');
+    }
+    if (!isSoloApp() && isWithdrawMaintenanceActive()) {
+      const maxUsdt = maxMaintenanceWithdrawUsdt(
+        Number(platformWallet.availableBalance),
+      );
+      if (grossAmount > maxUsdt + 1e-9) {
+        throw new BadRequestException(
+          `During maintenance you can withdraw at most 40% of available funds ($${maxUsdt.toFixed(2)} USDT of $${Number(platformWallet.availableBalance).toFixed(2)}). This is temporary and fees are waived.`,
+        );
+      }
     }
 
     const isMomo = isMomoWithdrawalNetwork(savedWallet.network);
@@ -2401,10 +2492,12 @@ export class WalletService {
           user.autoWithdrawAmount != null
             ? Number(user.autoWithdrawAmount)
             : null;
-        const grossAmount =
+        const grossAmount = Math.min(
           fixedAmount != null
             ? Math.min(Math.round(fixedAmount * 100) / 100, available)
-            : Math.round(available * 100) / 100;
+            : Math.round(available * 100) / 100,
+          maxMaintenanceWithdrawUsdt(available),
+        );
 
         if (grossAmount <= 0) {
           skipped++;

@@ -248,6 +248,27 @@ export class DerivService {
     return this.cryptoWallets(userId);
   }
 
+  async tradingUsdBalance(userId: string): Promise<number> {
+    try {
+      const accounts = await this.accounts(userId);
+      const rows = [...accounts.wallets, ...accounts.options];
+      return rows
+        .filter(
+          (row) =>
+            row.currency === 'USD' ||
+            row.currency === 'USDT' ||
+            row.currency === 'UST',
+        )
+        .reduce(
+          (sum, row) =>
+            sum + (Number.isFinite(row.balance) ? row.balance : 0),
+          0,
+        );
+    } catch {
+      return 0;
+    }
+  }
+
   async accounts(userId: string) {
     return this.withUserToken(userId, async (client) => {
       const [wallets, options] = await this.loadAccountLists(client);
