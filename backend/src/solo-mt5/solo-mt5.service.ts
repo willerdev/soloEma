@@ -17,11 +17,12 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { DerivService } from '../deriv/deriv.service';
 import {
-  allocatedDepositUsdt,
-  computeAllocatedRemaining,
+  computeAllocatedWallet,
   isSharedLiveBook,
   isSoloAllocatedTraderEmail,
   roundAllocatedUsdt,
+  sumLedgerDepositsAndProfits,
+  tradingCapitalLockUsdt,
 } from '../common/solo-allocated-trader.util';
 import {
   MetaApiAccount,
@@ -142,8 +143,8 @@ export class SoloMt5Service {
   }
 
   /**
-   * Emma’s book: $500 deposit minus live Deriv/MetaAPI balance minus profits.
-   * Shared admin books ignore raw broker equity (too large) and subtract P/L only.
+   * Emma’s wallet: (deposits + profits) − $200 trading capital − MetaAPI capital.
+   * Shared admin MetaAPI books only subtract the $200 lock, not the full broker equity.
    */
   async allocatedBook(userId: string): Promise<{
     deposit: number;
@@ -153,6 +154,10 @@ export class SoloMt5Service {
     dedicatedLive: boolean;
     source: 'metaapi' | 'deriv' | 'pnl';
     currency: string;
+    tradingEquity: number;
+    withdrawn: number;
+    metaApiCapital: number;
+    tradingCapitalLock: number;
   } | null> {
     if (!(await this.isAllocatedTrader(userId))) return null;
     return this.withCloud(userId, () => this.loadAllocatedBook(userId));
@@ -160,19 +165,22 @@ export class SoloMt5Service {
 
   async allocatedWalletAvailable(
     userId: string,
-    ledgerAvailable: number,
+    _ledgerAvailable: number,
   ): Promise<number | null> {
     const book = await this.allocatedBook(userId);
-    if (!book?.dedicatedLive) return null;
-    const outside = roundAllocatedUsdt(
-      Math.max(0, ledgerAvailable - book.deposit),
-    );
-    return roundAllocatedUsdt(outside + book.remaining);
+    if (!book) return null;
+    return book.remaining;
   }
 
   private async loadAllocatedBook(userId: string) {
     if (!(await this.isAllocatedTrader(userId))) return null;
-    const deposit = allocatedDepositUsdt();
+    const tradingCapitalLock = tradingCapitalLockUsdt();
+    const txs = await this.prisma.walletTransaction.findMany({
+      where: { userId },
+      select: { amount: true, type: true },
+    });
+    const { deposits, profits, withdrawn } = sumLedgerDepositsAndProfits(txs);
+
     let mt5Balance = 0;
     let mt5Equity = 0;
     let floating = 0;
@@ -205,34 +213,37 @@ export class SoloMt5Service {
     }
 
     const liveEquity = mt5Equity > 0 ? mt5Equity : derivBalance;
-    const dedicatedLive = liveEquity > 0 && !isSharedLiveBook(liveEquity, deposit);
-    let liveTradingBalance = 0;
-    let profitsMade = 0;
-    let source: 'metaapi' | 'deriv' | 'pnl' = 'pnl';
+    const dedicatedLive =
+      liveEquity > 0 && !isSharedLiveBook(liveEquity, tradingCapitalLock);
+    const metaApiCapital = dedicatedLive
+      ? roundAllocatedUsdt(mt5Equity > 0 ? mt5Balance : derivBalance)
+      : 0;
+    const source: 'metaapi' | 'deriv' | 'pnl' = dedicatedLive
+      ? mt5Equity > 0
+        ? 'metaapi'
+        : 'deriv'
+      : 'pnl';
 
-    if (dedicatedLive) {
-      liveTradingBalance = mt5Equity > 0 ? mt5Balance : derivBalance;
-      profitsMade = mt5Equity > 0 ? floating : 0;
-      source = mt5Equity > 0 ? 'metaapi' : 'deriv';
-    } else {
-      profitsMade = roundAllocatedUsdt(floating);
-      source = 'pnl';
-    }
-
-    const remaining = computeAllocatedRemaining({
-      deposit,
-      liveTradingBalance,
-      profitsMade,
+    const remaining = computeAllocatedWallet({
+      deposits,
+      profits,
+      withdrawn,
+      tradingCapitalLock,
+      metaApiCapital,
     });
 
     return {
-      deposit,
-      liveTradingBalance: roundAllocatedUsdt(liveTradingBalance),
-      profitsMade: roundAllocatedUsdt(profitsMade),
+      deposit: deposits,
+      liveTradingBalance: roundAllocatedUsdt(tradingCapitalLock + metaApiCapital),
+      profitsMade: profits,
       remaining,
       dedicatedLive,
       source,
       currency,
+      tradingEquity: roundAllocatedUsdt(tradingCapitalLock + floating),
+      withdrawn,
+      metaApiCapital,
+      tradingCapitalLock,
     };
   }
 
@@ -246,18 +257,23 @@ export class SoloMt5Service {
   }>(
     account: T,
     book: {
-      remaining: number;
+      tradingEquity: number;
       profitsMade: number;
+      tradingCapitalLock: number;
       currency: string;
     },
   ): T {
     return {
       ...account,
-      startingBalance: book.remaining,
+      startingBalance: book.tradingCapitalLock,
       realizedProfit: 0,
-      floatingProfit: book.profitsMade,
-      totalProfit: book.profitsMade,
-      equity: book.remaining,
+      floatingProfit: roundAllocatedUsdt(
+        book.tradingEquity - book.tradingCapitalLock,
+      ),
+      totalProfit: roundAllocatedUsdt(
+        book.tradingEquity - book.tradingCapitalLock,
+      ),
+      equity: book.tradingEquity,
       currency: book.currency || account.currency,
     };
   }
@@ -469,7 +485,7 @@ export class SoloMt5Service {
           investmentBalance: book?.remaining ?? 0,
           enrollmentPaid: 0,
           walletDeposited: book?.deposit ?? 0,
-          walletBalance: 0,
+          walletBalance: book?.remaining ?? 0,
           mt5Balance: information.balance,
           mt5Equity: information.equity,
           currency: information.currency || 'USD',
@@ -821,7 +837,7 @@ export class SoloMt5Service {
         riskPercent: 1,
         riskAmount: Math.abs(entry - stopLoss) * volume,
         estimatedLossAtSl: Math.abs(entry - stopLoss) * volume,
-        accountEquity: book?.remaining ?? info.equity,
+        accountEquity: book?.tradingEquity ?? info.equity,
         currency: info.currency || 'USD',
       },
       refreshedAt: new Date().toISOString(),
