@@ -153,7 +153,7 @@ export default function WalletPage() {
         open={withdrawOpen}
         onClose={() => setWithdrawOpen(false)}
         availableBalance={summary?.availableBalance ?? 0}
-        feeUsdt={summary?.withdrawalFeeUsdt ?? 3}
+        feeUsdt={summary?.withdrawalFeeUsdt ?? 0}
         onComplete={() => void refresh()}
       />
       <WalletSavedWalletsModal

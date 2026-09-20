@@ -539,11 +539,11 @@ export class WalletService {
     const vipActive = isInvestorVipActive(vipUser ?? {}) || vvipActive;
     const maintenance = !isSoloApp() && isWithdrawMaintenanceActive();
     const processingFeeUsdt =
-      maintenance && WITHDRAW_MAINTENANCE.feesWaived
+      isSoloApp() ||
+      (maintenance && WITHDRAW_MAINTENANCE.feesWaived) ||
+      vipActive
         ? 0
-        : vipActive
-          ? 0
-          : Number(config?.walletWithdrawalFeeUsdt ?? WALLET_WITHDRAWAL_FEE_USD);
+        : Number(config?.walletWithdrawalFeeUsdt ?? WALLET_WITHDRAWAL_FEE_USD);
     const scheduleEnabled =
       isSoloApp() || maintenance
         ? false
@@ -552,7 +552,7 @@ export class WalletService {
       config?.withdrawalPreferredSchedule,
     );
     const offSchedulePenaltyPercent =
-      maintenance && WITHDRAW_MAINTENANCE.feesWaived
+      isSoloApp() || (maintenance && WITHDRAW_MAINTENANCE.feesWaived)
         ? 0
         : Number(config?.withdrawalOffSchedulePenaltyPercent ?? 8);
     const scheduleQuote = quoteWithdrawalFees({
@@ -1513,6 +1513,15 @@ export class WalletService {
     const preferredSchedule = normalizePreferredSchedule(
       config?.withdrawalPreferredSchedule,
     );
+    if (isSoloApp()) {
+      return quoteWithdrawalFees({
+        grossUsdt: grossAmount,
+        processingFeeUsdt: 0,
+        scheduleEnabled: false,
+        preferredSchedule,
+        offSchedulePenaltyPercent: 0,
+      });
+    }
     if (!isSoloApp() && isWithdrawMaintenanceActive()) {
       return quoteWithdrawalFees({
         grossUsdt: grossAmount,
@@ -2277,10 +2286,12 @@ export class WalletService {
         investorVvipActive: true,
       },
     });
-    const processingFeeUsdt = isInvestorVvipActive(vipUser ?? {}) ||
+    const processingFeeUsdt =
+      isSoloApp() ||
+      isInvestorVvipActive(vipUser ?? {}) ||
       isInvestorVipActive(vipUser ?? {})
-      ? 0
-      : Number(config?.walletWithdrawalFeeUsdt ?? WALLET_WITHDRAWAL_FEE_USD);
+        ? 0
+        : Number(config?.walletWithdrawalFeeUsdt ?? WALLET_WITHDRAWAL_FEE_USD);
 
     return {
       eligible: isSoloApp() || user.autoWithdrawEligible,
