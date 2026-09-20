@@ -14,6 +14,7 @@ import {
   decryptCredential,
   encryptCredential,
 } from '../common/credential-crypto.util';
+import { ConfigService } from '@nestjs/config';
 import { DerivService } from '../deriv/deriv.service';
 import {
   allocatedDepositUsdt,
