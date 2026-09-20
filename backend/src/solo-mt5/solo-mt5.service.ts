@@ -165,11 +165,11 @@ export class SoloMt5Service {
 
   async allocatedWalletAvailable(
     userId: string,
-    _ledgerAvailable: number,
+    ledgerAvailable: number,
   ): Promise<number | null> {
-    const book = await this.allocatedBook(userId);
-    if (!book) return null;
-    return book.remaining;
+    if (!(await this.isAllocatedTrader(userId))) return null;
+    // Show the Soloema ledger. Deriv/MetaAPI capital is not deducted from wallet.
+    return roundAllocatedUsdt(Math.max(0, ledgerAvailable));
   }
 
   private async loadAllocatedBook(userId: string) {
@@ -229,9 +229,8 @@ export class SoloMt5Service {
     const liveEquity = mt5Equity > 0 ? mt5Equity : derivBalance;
     const dedicatedLive =
       liveEquity > 0 && !isSharedLiveBook(liveEquity, tradingCapitalLock);
-    const metaApiCapital = dedicatedLive
-      ? roundAllocatedUsdt(mt5Equity > 0 ? mt5Balance : derivBalance)
-      : 0;
+    // Deriv/MetaAPI capital is not Soloema wallet funds — never subtract it here.
+    const metaApiCapital = 0;
     const source: 'metaapi' | 'deriv' | 'pnl' = dedicatedLive
       ? mt5Equity > 0
         ? 'metaapi'
