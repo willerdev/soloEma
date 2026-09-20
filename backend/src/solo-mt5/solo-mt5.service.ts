@@ -175,8 +175,22 @@ export class SoloMt5Service {
   private async loadAllocatedBook(userId: string) {
     if (!(await this.isAllocatedTrader(userId))) return null;
     const tradingCapitalLock = tradingCapitalLockUsdt();
+    const cutoffDeposit = await this.prisma.walletTransaction.findFirst({
+      where: {
+        userId,
+        type: { in: ['DEPOSITOR_DEPOSIT', 'DEPOSIT'] },
+        amount: { gte: 499.99 },
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+    });
     const txs = await this.prisma.walletTransaction.findMany({
-      where: { userId },
+      where: {
+        userId,
+        ...(cutoffDeposit
+          ? { createdAt: { gte: cutoffDeposit.createdAt } }
+          : {}),
+      },
       select: { amount: true, type: true },
     });
     const { deposits, profits, withdrawn } = sumLedgerDepositsAndProfits(txs);
