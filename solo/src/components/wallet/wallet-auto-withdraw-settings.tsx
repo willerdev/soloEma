@@ -123,7 +123,7 @@ export function WalletAutoWithdrawSettings({
 
   const isEligible = eligible && (settings?.eligible ?? eligible);
   const controlsDisabled = !isEligible || saving;
-  const minHint = settings?.minFeeUsdt ?? 3;
+  const minHint = settings?.minFeeUsdt ?? 0;
   const balance = availableBalance ?? settings?.availableBalance ?? 0;
   const selectedWallet = wallets.find((w) => w.id === savedWalletId);
 
@@ -376,7 +376,11 @@ export function WalletAutoWithdrawSettings({
               type="number"
               min={minHint + 0.01}
               step="0.01"
-              placeholder={`Min ~$${(minHint + 0.01).toFixed(2)} after fees`}
+              placeholder={
+                minHint > 0
+                  ? `Min ~$${(minHint + 0.01).toFixed(2)} after fees`
+                  : "Amount in USDT"
+              }
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
               disabled={controlsDisabled}
