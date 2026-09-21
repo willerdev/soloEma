@@ -39,6 +39,10 @@ import { BinanceC2cService } from '../fx/binance-c2c.service';
 import { resolvePreferredDisplayCurrency } from '../fx/country-currency.util';
 import { isInvestorVipActive } from '../investor/investor-vip.util';
 import { isSoloApp } from '../common/app-variant';
+import {
+  SOLO_WALLET_WITHDRAW_ENABLED,
+  SOLO_WALLET_WITHDRAW_PAUSED_LABEL,
+} from '../common/solo-wallet-withdraw';
 import { SoloMt5Service } from '../solo-mt5/solo-mt5.service';
 import { assertSoloCanManageTrades } from '../common/solo-admin.util';
 import {
@@ -1393,6 +1397,10 @@ export class WalletService {
   ) {
     await this.compliance.requireKycForPayout(userId);
 
+    if (isSoloApp() && !SOLO_WALLET_WITHDRAW_ENABLED) {
+      throw new BadRequestException(SOLO_WALLET_WITHDRAW_PAUSED_LABEL);
+    }
+
     if (!savedWalletId?.trim()) {
       throw new BadRequestException(
         'Select a saved withdrawal wallet or add one before withdrawing',
@@ -1751,6 +1759,10 @@ export class WalletService {
   ) {
     await this.compliance.requireKycForPayout(userId);
 
+    if (isSoloApp() && !SOLO_WALLET_WITHDRAW_ENABLED) {
+      throw new BadRequestException(SOLO_WALLET_WITHDRAW_PAUSED_LABEL);
+    }
+
     if (!savedWalletId?.trim()) {
       throw new BadRequestException(
         'Select a saved withdrawal wallet or add one before withdrawing',
@@ -1801,6 +1813,9 @@ export class WalletService {
     savedWalletId: string,
     opts?: { actor?: 'user' | 'auto_withdraw' },
   ) {
+    if (isSoloApp() && !SOLO_WALLET_WITHDRAW_ENABLED) {
+      throw new BadRequestException(SOLO_WALLET_WITHDRAW_PAUSED_LABEL);
+    }
     await this.assertLoanWithdrawAllowed(userId, grossAmount);
     const vipUser = await this.prisma.user.findUnique({
       where: { id: userId },

@@ -12,6 +12,10 @@ import { CurrencySwitcher } from "@/components/currency-switcher";
 import { AuthLoadingScreen, useRequireAuth } from "@/hooks/use-require-auth";
 import { syncApiAuthToken, useAuthStore } from "@/stores/auth";
 import { Loader2, RefreshCw } from "lucide-react";
+import {
+  SOLO_WALLET_WITHDRAW_ENABLED,
+  SOLO_WALLET_WITHDRAW_PAUSED_LABEL,
+} from "@/lib/solo-wallet-withdraw";
 
 export default function WalletPage() {
   const { ready } = useRequireAuth();
@@ -135,9 +139,14 @@ export default function WalletPage() {
             balance={summary.availableBalance}
             displayCurrency={summary.displayCurrency}
             savedWalletCount={walletCount}
-            onWithdraw={() => setWithdrawOpen(true)}
+            onWithdraw={() => {
+              if (!SOLO_WALLET_WITHDRAW_ENABLED) return;
+              setWithdrawOpen(true);
+            }}
             onDeposit={() => setDepositOpen(true)}
             onManageWallets={() => setWalletsOpen(true)}
+            withdrawDisabled={!SOLO_WALLET_WITHDRAW_ENABLED}
+            withdrawDisabledLabel={SOLO_WALLET_WITHDRAW_PAUSED_LABEL}
           />
           <WalletPendingWithdrawals onCancelled={() => void refresh()} />
         </div>

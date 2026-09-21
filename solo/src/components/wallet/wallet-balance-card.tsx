@@ -10,6 +10,8 @@ type WalletBalanceCardProps = {
   onWithdraw: () => void;
   onDeposit: () => void;
   onManageWallets: () => void;
+  withdrawDisabled?: boolean;
+  withdrawDisabledLabel?: string;
 };
 
 export function WalletBalanceCard({
@@ -19,6 +21,8 @@ export function WalletBalanceCard({
   onWithdraw,
   onDeposit,
   onManageWallets,
+  withdrawDisabled = false,
+  withdrawDisabledLabel = "Balance in use",
 }: WalletBalanceCardProps) {
   const usdtHint = formatUsdtHint(balance, displayCurrency);
   const badge =
@@ -58,10 +62,18 @@ export function WalletBalanceCard({
         <button
           type="button"
           onClick={onWithdraw}
-          className="flex items-center justify-center gap-2 rounded-2xl bg-[#0b1528]/55 py-3.5 text-sm font-semibold text-white ring-1 ring-white/20 backdrop-blur-sm transition hover:bg-[#0b1528]/80"
+          disabled={withdrawDisabled}
+          className="flex flex-col items-center justify-center gap-0.5 rounded-2xl bg-[#0b1528]/55 py-3.5 text-sm font-semibold text-white ring-1 ring-white/20 backdrop-blur-sm transition hover:bg-[#0b1528]/80 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-[#0b1528]/55"
         >
-          <ArrowUpRight className="h-4 w-4" />
-          Withdraw
+          <span className="flex items-center gap-2">
+            <ArrowUpRight className="h-4 w-4" />
+            Withdraw
+          </span>
+          {withdrawDisabled ? (
+            <span className="text-[11px] font-medium text-white/70">
+              {withdrawDisabledLabel}
+            </span>
+          ) : null}
         </button>
       </div>
 
