@@ -470,11 +470,13 @@ export class SoloMt5Service {
 
     try {
       const account = await this.metaApi.ensureAccountReady(linked);
-      const [information, positions, orders] = await Promise.all([
+      const [information, positionsRaw, ordersRaw] = await Promise.all([
         this.metaApi.getAccountInformation(account),
         this.metaApi.getPositions(account),
         this.metaApi.getOrders(account),
       ]);
+      const positions = await this.onlyOwnPositions(userId, positionsRaw);
+      const orders = await this.onlyOwnOrders(userId, ordersRaw);
       const running = positions.map((p) => this.mapPosition(p));
       const limits = orders.map((o) => this.mapOrder(o));
       const trades = [...running, ...limits];
@@ -538,10 +540,12 @@ export class SoloMt5Service {
     if (!ctx) {
       return { items: [], refreshedAt: new Date().toISOString() };
     }
-    const [positions, orders] = await Promise.all([
+    const [positionsRaw, ordersRaw] = await Promise.all([
       this.metaApi.getPositions(ctx.account),
       this.metaApi.getOrders(ctx.account),
     ]);
+    const positions = await this.onlyOwnPositions(userId, positionsRaw);
+    const orders = await this.onlyOwnOrders(userId, ordersRaw);
     const symbols = [
       ...new Set(
         [...positions, ...orders]
@@ -713,10 +717,11 @@ export class SoloMt5Service {
     if (!this.metaApi.isConfigured) return empty;
     const ctx = await this.readyAccountOrNull(userId);
     if (!ctx) return empty;
-    const [information, positions] = await Promise.all([
+    const [information, positionsRaw] = await Promise.all([
       this.metaApi.getAccountInformation(ctx.account),
       this.metaApi.getPositions(ctx.account),
     ]);
+    const positions = await this.onlyOwnPositions(userId, positionsRaw);
     const trades = positions.map((p) => this.mapPosition(p));
     const floatingProfit = trades.reduce((sum, t) => sum + (t.profit ?? 0), 0);
     const rawAccount = {
@@ -887,7 +892,6 @@ export class SoloMt5Service {
       stopLoss: dto.stopLoss,
       takeProfit: dto.takeProfit,
       comment: soloTradeComment(userId),
-      clientId: soloTradeComment(userId),
       price,
       specDigits: spec.digits,
     });
@@ -981,6 +985,7 @@ export class SoloMt5Service {
     const positions = await this.metaApi.getPositions(ctx.account);
     const pos = positions.find((p) => p.id === positionId);
     if (pos) {
+      await this.assertOwnsOpen(userId, pos.id, pos.comment ?? pos.clientId);
       const spec = await this.metaApi.getSymbolSpecification(
         ctx.account,
         pos.symbol,
@@ -1014,6 +1019,7 @@ export class SoloMt5Service {
     if (!order) {
       throw new NotFoundException('Position or pending order not found');
     }
+    await this.assertOwnsOpen(userId, order.id, order.comment ?? order.clientId);
     const spec = await this.metaApi.getSymbolSpecification(
       ctx.account,
       order.symbol,
@@ -1081,6 +1087,7 @@ export class SoloMt5Service {
     if (!pos) {
       throw new NotFoundException('Open position not found');
     }
+    await this.assertOwnsOpen(userId, pos.id, pos.comment ?? pos.clientId);
     const spec = await this.metaApi.getSymbolSpecification(
       ctx.account,
       pos.symbol,
@@ -1147,6 +1154,7 @@ export class SoloMt5Service {
     if (!pos) {
       throw new NotFoundException('Open position not found');
     }
+    await this.assertOwnsOpen(userId, pos.id, pos.comment ?? pos.clientId);
     const spec = await this.metaApi.getSymbolSpecification(
       ctx.account,
       pos.symbol,
@@ -1215,13 +1223,17 @@ export class SoloMt5Service {
   private async loadClosePosition(userId: string, positionId: string) {
     const ctx = await this.requireAccount(userId);
     const positions = await this.metaApi.getPositions(ctx.account);
-    if (positions.some((p) => p.id === positionId)) {
+    const pos = positions.find((p) => p.id === positionId);
+    if (pos) {
+      await this.assertOwnsOpen(userId, pos.id, pos.comment ?? pos.clientId);
       await this.metaApi.closePositionById(ctx.account, positionId);
       void this.settleSoon(userId);
       return { ok: true, positionId, status: 'closed' };
     }
     const orders = await this.metaApi.getOrders(ctx.account);
-    if (orders.some((o) => o.id === positionId)) {
+    const order = orders.find((o) => o.id === positionId);
+    if (order) {
+      await this.assertOwnsOpen(userId, order.id, order.comment ?? order.clientId);
       await this.metaApi.cancelPendingOrder(ctx.account, positionId);
       return { ok: true, positionId, status: 'cancelled' };
     }
@@ -1234,7 +1246,10 @@ export class SoloMt5Service {
 
   private async loadCloseAll(userId: string) {
     const ctx = await this.requireAccount(userId);
-    const positions = await this.metaApi.getPositions(ctx.account);
+    const positions = await this.onlyOwnPositions(
+      userId,
+      await this.metaApi.getPositions(ctx.account),
+    );
     const results: {
       symbol: string;
       positionId?: string;
@@ -1309,8 +1324,14 @@ export class SoloMt5Service {
         message: err instanceof Error ? err.message : 'Could not load history',
       };
     }
-    const items = this.mapClosedDeals(deals).filter((row) =>
-      isAfterSoloMt5HistoryReset(row.closedAt),
+    const items = (
+      await this.onlyOwnHistory(
+        userId,
+        this.mapClosedDeals(deals).filter((row) =>
+          isAfterSoloMt5HistoryReset(row.closedAt),
+        ),
+        deals,
+      )
     );
     await this.traders?.settleClosedDeals(deals);
     this.logger.log(
@@ -1476,6 +1497,56 @@ export class SoloMt5Service {
     };
   }
 
+  private async onlyOwnPositions(
+    userId: string,
+    positions: MetaApiPosition[],
+  ): Promise<MetaApiPosition[]> {
+    const scope = await this.traders?.tradeScope(userId);
+    if (!scope?.isolate) return positions;
+    return positions.filter((p) =>
+      scope.owns(p.id, p.comment ?? p.clientId),
+    );
+  }
+
+  private async onlyOwnOrders(
+    userId: string,
+    orders: MetaApiOrder[],
+  ): Promise<MetaApiOrder[]> {
+    const scope = await this.traders?.tradeScope(userId);
+    if (!scope?.isolate) return orders;
+    return orders.filter((o) => scope.owns(o.id, o.comment ?? o.clientId));
+  }
+
+  private async onlyOwnHistory(
+    userId: string,
+    items: Array<{ id: string; signalId: string }>,
+    deals: MetaApiDeal[],
+  ) {
+    const scope = await this.traders?.tradeScope(userId);
+    if (!scope?.isolate) return items;
+    const comments = new Map<string, string>();
+    for (const d of deals) {
+      const key = d.positionId || d.id;
+      if (d.comment) comments.set(key, d.comment);
+    }
+    return items.filter(
+      (row) =>
+        scope.owns(row.signalId, comments.get(row.signalId)) ||
+        scope.owns(row.id, comments.get(row.id)),
+    );
+  }
+
+  private async assertOwnsOpen(
+    userId: string,
+    id: string,
+    comment?: string | null,
+  ) {
+    const scope = await this.traders?.tradeScope(userId);
+    if (!scope?.isolate) return;
+    if (scope.owns(id, comment)) return;
+    throw new NotFoundException('Position or pending order not found');
+  }
+
   private mapPosition(pos: MetaApiPosition) {
     const pnl = Number(pos.unrealizedProfit || pos.profit || 0);
     return {
@@ -1495,7 +1566,7 @@ export class SoloMt5Service {
       canAdjustStops: true,
       canPartialClose: pos.volume > 0,
       canSetBreakeven: true,
-      executionLabel: 'Running on your linked MT5',
+      executionLabel: 'Your live trade',
     };
   }
 
