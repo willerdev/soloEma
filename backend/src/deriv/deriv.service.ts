@@ -9,7 +9,10 @@ import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { resolveJwtSecret } from '../config/jwt-secret';
-import { resolveSoloSharedOwnerUserId } from '../common/solo-admin.util';
+import {
+  assertSoloCanManageTrades,
+  resolveSoloSharedOwnerUserId,
+} from '../common/solo-admin.util';
 import {
   decryptCredential,
   encryptCredential,
@@ -97,6 +100,16 @@ export class DerivService {
       userId,
     );
     return ownerUserId;
+  }
+
+  private async assertCanManageTrades(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true, soloTradeOperator: true },
+    });
+    assertSoloCanManageTrades(user?.email, {
+      soloTradeOperator: user?.soloTradeOperator,
+    });
   }
 
   async status(userId: string) {
@@ -317,6 +330,7 @@ export class DerivService {
       currency: string;
     },
   ) {
+    await this.assertCanManageTrades(userId);
     assertActionRateLimit(userId);
     if (input.accountFrom === input.accountTo) {
       throw new BadRequestException('Pick two different accounts.');
@@ -372,6 +386,7 @@ export class DerivService {
   }
 
   async sellContract(userId: string, contractId: string) {
+    await this.assertCanManageTrades(userId);
     assertActionRateLimit(userId);
     const id = Number(contractId);
     if (!Number.isFinite(id) || id <= 0) {
