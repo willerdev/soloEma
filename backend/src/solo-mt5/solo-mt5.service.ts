@@ -38,11 +38,14 @@ import {
   humanizeBrokerError,
 } from '../common/broker-error.util';
 import { normalizeDerivSymbol } from '../ai/deriv-symbols';
+import { isAfterSoloMt5HistoryReset } from '../common/solo-mt5-history-since';
 import { computeOneToOnePrice } from '../common/rr.util';
 import {
   defaultMt5ChartSlPips,
   getPipSize,
 } from '../common/pip.util';
+import { SoloTraderService } from './solo-trader.service';
+import { soloTradeComment } from '../common/solo-trade-operator.util';
 import {
   ModifyMt5PositionStopsDto,
   PartialCloseMt5PositionDto,
@@ -90,6 +93,7 @@ export class SoloMt5Service {
     private metaApi: MetaApiService,
     private config: ConfigService,
     @Optional() private deriv?: DerivService,
+    @Optional() private traders?: SoloTraderService,
   ) {}
 
   private cryptoSecret() {
@@ -864,27 +868,46 @@ export class SoloMt5Service {
   private async loadPlaceOrder(userId: string, dto: PlaceMt5MarketOrderDto) {
     const ctx = await this.requireAccount(userId);
     const symbol = normalizeChartSymbol(dto.symbol);
-    const { trade, price } = await this.metaApi.placeMarketOrder({
+    const spec = await this.metaApi.getSymbolSpecification(ctx.account, symbol);
+    const price = await this.metaApi.getSymbolPrice(ctx.account, symbol);
+    const volume = dto.volume ?? 0.01;
+    const entry =
+      dto.direction === TradeDirection.BUY ? price.ask : price.bid;
+    await this.assertOperatorRisk(userId, {
+      entry,
+      stopLoss: dto.stopLoss,
+      volume,
+      contractSize: spec.contractSize,
+    });
+    const { trade } = await this.metaApi.placeMarketOrder({
       account: ctx.account,
       symbol,
       direction: dto.direction,
-      volume: dto.volume ?? 0.01,
+      volume,
       stopLoss: dto.stopLoss,
       takeProfit: dto.takeProfit,
-      comment: 'SOLO Expert',
+      comment: soloTradeComment(userId),
+      clientId: soloTradeComment(userId),
+      price,
+      specDigits: spec.digits,
+    });
+    await this.traders?.recordOpen({
+      userId,
+      positionId: trade.positionId,
+      orderId: trade.orderId,
     });
     return {
       status: 'placed',
       signalId: trade.positionId ?? trade.orderId ?? symbol,
       symbol,
       direction: dto.direction,
-      entryPrice: dto.direction === TradeDirection.BUY ? price.ask : price.bid,
+      entryPrice: entry,
       stopLoss: dto.stopLoss,
       takeProfit: dto.takeProfit,
       pending: Boolean(trade.orderId && !trade.positionId),
       quote: price,
       risk: {
-        volume: dto.volume ?? 0.01,
+        volume,
         riskPercent: 1,
         riskAmount: 0,
         estimatedLossAtSl: 0,
@@ -901,6 +924,39 @@ export class SoloMt5Service {
         message: trade.message,
       },
     };
+  }
+
+  private async assertOperatorRisk(
+    userId: string,
+    input: {
+      entry: number;
+      stopLoss: number;
+      volume: number;
+      contractSize: number;
+    },
+  ) {
+    const risk = await this.traders?.loadOperatorRisk(userId);
+    if (!risk?.isOperator || risk.isPlatformAdmin) return;
+    if (!Number.isFinite(input.stopLoss) || input.stopLoss <= 0) {
+      throw new BadRequestException('A stop loss is required for your risk cap');
+    }
+    const dist = Math.abs(input.entry - input.stopLoss);
+    const contract = input.contractSize > 0 ? input.contractSize : 100000;
+    const riskAmount = dist * input.volume * contract;
+    const ctx = await this.requireAccount(userId);
+    let equity = tradingCapitalLockUsdt();
+    try {
+      const info = await this.metaApi.getAccountInformation(ctx.account);
+      equity = Number(info.equity || info.balance || 0) || equity;
+    } catch {
+      /* keep lock fallback */
+    }
+    const pct = equity > 0 ? (riskAmount / equity) * 100 : 100;
+    if (pct > risk.maxRiskPercent + 0.0001) {
+      throw new BadRequestException(
+        `This order risks about ${pct.toFixed(2)}% of equity. Your max is ${risk.maxRiskPercent}%. Reduce volume or tighten the stop.`,
+      );
+    }
   }
 
   async modifyStops(
@@ -1161,6 +1217,7 @@ export class SoloMt5Service {
     const positions = await this.metaApi.getPositions(ctx.account);
     if (positions.some((p) => p.id === positionId)) {
       await this.metaApi.closePositionById(ctx.account, positionId);
+      void this.settleSoon(userId);
       return { ok: true, positionId, status: 'closed' };
     }
     const orders = await this.metaApi.getOrders(ctx.account);
@@ -1201,7 +1258,18 @@ export class SoloMt5Service {
         });
       }
     }
+    void this.settleSoon(userId);
     return { ok: true, results };
+  }
+
+  private async settleSoon(userId: string) {
+    try {
+      await this.loadHistory(userId, true, 2);
+    } catch (err) {
+      this.logger.warn(
+        `Solo P&L settle failed: ${err instanceof Error ? err.message : 'unknown'}`,
+      );
+    }
   }
 
   async history(userId: string, fresh = false, days = 2) {
@@ -1241,7 +1309,10 @@ export class SoloMt5Service {
         message: err instanceof Error ? err.message : 'Could not load history',
       };
     }
-    const items = this.mapClosedDeals(deals);
+    const items = this.mapClosedDeals(deals).filter((row) =>
+      isAfterSoloMt5HistoryReset(row.closedAt),
+    );
+    await this.traders?.settleClosedDeals(deals);
     this.logger.log(
       `Solo MT5 history deals=${deals.length} closed=${items.length}`,
     );

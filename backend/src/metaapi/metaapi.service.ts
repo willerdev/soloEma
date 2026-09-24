@@ -132,6 +132,7 @@ export type MetaApiDeal = {
   swap: number;
   positionId: string;
   orderId?: string;
+  comment?: string;
 };
 
 export type MetaApiOrder = {
@@ -1143,6 +1144,7 @@ export class MetaApiService {
       swap: Number(raw.swap ?? 0),
       positionId: String(raw.positionId ?? raw.orderId ?? raw.id ?? ''),
       orderId: raw.orderId != null ? String(raw.orderId) : undefined,
+      comment: typeof raw.comment === 'string' ? raw.comment : undefined,
     };
   }
 

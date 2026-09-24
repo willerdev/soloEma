@@ -13,8 +13,8 @@ import { AuthLoadingScreen, useRequireAuth } from "@/hooks/use-require-auth";
 import { syncApiAuthToken, useAuthStore } from "@/stores/auth";
 import { Loader2, RefreshCw } from "lucide-react";
 import {
-  SOLO_WALLET_WITHDRAW_ENABLED,
   SOLO_WALLET_WITHDRAW_PAUSED_LABEL,
+  isSoloWalletWithdrawEnabled,
 } from "@/lib/solo-wallet-withdraw";
 
 export default function WalletPage() {
@@ -140,14 +140,33 @@ export default function WalletPage() {
             displayCurrency={summary.displayCurrency}
             savedWalletCount={walletCount}
             onWithdraw={() => {
-              if (!SOLO_WALLET_WITHDRAW_ENABLED) return;
+              if (!isSoloWalletWithdrawEnabled(summary)) return;
               setWithdrawOpen(true);
             }}
             onDeposit={() => setDepositOpen(true)}
             onManageWallets={() => setWalletsOpen(true)}
-            withdrawDisabled={!SOLO_WALLET_WITHDRAW_ENABLED}
+            withdrawDisabled={!isSoloWalletWithdrawEnabled(summary)}
             withdrawDisabledLabel={SOLO_WALLET_WITHDRAW_PAUSED_LABEL}
           />
+          {summary.soloTradeOperator || summary.tradingProfit ? (
+            <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+                Trading profit
+              </p>
+              <p className="mt-1 text-lg font-semibold tabular-nums text-white">
+                {(summary.tradingProfit?.realizedPnl ?? 0).toFixed(2)} USDT
+              </p>
+              <p className="text-xs text-muted">
+                Available to withdraw{" "}
+                {(
+                  summary.tradingProfit?.availableToWithdraw ??
+                  summary.availableBalance
+                ).toFixed(2)}{" "}
+                USDT · max risk{" "}
+                {summary.tradingProfit?.maxRiskPercent ?? 1}%
+              </p>
+            </div>
+          ) : null}
           <WalletPendingWithdrawals onCancelled={() => void refresh()} />
         </div>
       )}

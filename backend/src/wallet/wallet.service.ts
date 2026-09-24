@@ -40,8 +40,8 @@ import { resolvePreferredDisplayCurrency } from '../fx/country-currency.util';
 import { isInvestorVipActive } from '../investor/investor-vip.util';
 import { isSoloApp } from '../common/app-variant';
 import {
-  SOLO_WALLET_WITHDRAW_ENABLED,
   SOLO_WALLET_WITHDRAW_PAUSED_LABEL,
+  isSoloWalletWithdrawEnabledForUser,
 } from '../common/solo-wallet-withdraw';
 import { SoloMt5Service } from '../solo-mt5/solo-mt5.service';
 import { assertSoloCanManageTrades } from '../common/solo-admin.util';
@@ -537,6 +537,9 @@ export class WalletService {
         investorVipExpiresAt: true,
         investorVvipActive: true,
         autoWithdrawEligible: true,
+        soloTradeOperator: true,
+        soloMaxRiskPercent: true,
+        soloRealizedPnl: true,
       },
     });
     const vvipActive = isInvestorVvipActive(vipUser ?? {});
@@ -632,6 +635,16 @@ export class WalletService {
       minDepositUsdt: Number(config?.depositorMinDepositUsdt ?? 50),
       autoWithdrawEligible:
         isSoloApp() || Boolean(vipUser?.autoWithdrawEligible),
+      soloTradeOperator: Boolean(vipUser?.soloTradeOperator),
+      soloWithdrawEnabled: isSoloWalletWithdrawEnabledForUser(vipUser ?? {}),
+      tradingProfit: {
+        realizedPnl: Number(vipUser?.soloRealizedPnl ?? 0),
+        maxRiskPercent: Number(vipUser?.soloMaxRiskPercent ?? 1) || 1,
+        availableToWithdraw: await this.spendableAvailable(
+          userId,
+          Number(wallet.availableBalance),
+        ),
+      },
     };
   }
 
@@ -1390,6 +1403,16 @@ export class WalletService {
     this.notifications.depositorPlanCompleted(userId, { amount });
   }
 
+  private async assertSoloWithdrawAllowed(userId: string) {
+    if (!isSoloApp()) return;
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { soloTradeOperator: true },
+    });
+    if (isSoloWalletWithdrawEnabledForUser(user ?? {})) return;
+    throw new BadRequestException(SOLO_WALLET_WITHDRAW_PAUSED_LABEL);
+  }
+
   async requestWithdrawOtp(
     userId: string,
     amount: number,
@@ -1397,9 +1420,7 @@ export class WalletService {
   ) {
     await this.compliance.requireKycForPayout(userId);
 
-    if (isSoloApp() && !SOLO_WALLET_WITHDRAW_ENABLED) {
-      throw new BadRequestException(SOLO_WALLET_WITHDRAW_PAUSED_LABEL);
-    }
+    await this.assertSoloWithdrawAllowed(userId);
 
     if (!savedWalletId?.trim()) {
       throw new BadRequestException(
@@ -1759,9 +1780,7 @@ export class WalletService {
   ) {
     await this.compliance.requireKycForPayout(userId);
 
-    if (isSoloApp() && !SOLO_WALLET_WITHDRAW_ENABLED) {
-      throw new BadRequestException(SOLO_WALLET_WITHDRAW_PAUSED_LABEL);
-    }
+    await this.assertSoloWithdrawAllowed(userId);
 
     if (!savedWalletId?.trim()) {
       throw new BadRequestException(
@@ -1813,9 +1832,7 @@ export class WalletService {
     savedWalletId: string,
     opts?: { actor?: 'user' | 'auto_withdraw' },
   ) {
-    if (isSoloApp() && !SOLO_WALLET_WITHDRAW_ENABLED) {
-      throw new BadRequestException(SOLO_WALLET_WITHDRAW_PAUSED_LABEL);
-    }
+    await this.assertSoloWithdrawAllowed(userId);
     await this.assertLoanWithdrawAllowed(userId, grossAmount);
     const vipUser = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -2246,7 +2263,13 @@ export class WalletService {
         'Shared payout login is only available on soloEmma.',
       );
     }
-    assertSoloCanManageTrades(email);
+    const actor = await this.prisma.user.findFirst({
+      where: { email: { equals: email ?? '', mode: 'insensitive' } },
+      select: { soloTradeOperator: true },
+    });
+    assertSoloCanManageTrades(email, {
+      soloTradeOperator: actor?.soloTradeOperator,
+    });
     const next = source.trim().toLowerCase() === 'settings' ? 'settings' : 'env';
     return this.nowPayments.setCredsSource(next, userId);
   }
@@ -2257,7 +2280,13 @@ export class WalletService {
         'Shared payout login is only available on soloEmma.',
       );
     }
-    assertSoloCanManageTrades(email);
+    const actor = await this.prisma.user.findFirst({
+      where: { email: { equals: email ?? '', mode: 'insensitive' } },
+      select: { soloTradeOperator: true },
+    });
+    assertSoloCanManageTrades(email, {
+      soloTradeOperator: actor?.soloTradeOperator,
+    });
     return this.nowPayments.probePayoutConnection();
   }
 
