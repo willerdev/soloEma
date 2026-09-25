@@ -552,6 +552,8 @@ export class SoloMt5Service {
           floatingProfit,
           totalProfit: floatingProfit,
           equity: information.equity,
+          margin: Number(information.margin ?? 0),
+          freeMargin: Number(information.freeMargin ?? 0),
         };
       const book = await this.loadAllocatedBook(userId);
       const displayAccount = book
@@ -780,13 +782,17 @@ export class SoloMt5Service {
     if (!this.metaApi.isConfigured) return empty;
     const ctx = await this.readyAccountOrNull(userId);
     if (!ctx) return empty;
-    const [information, positionsRaw] = await Promise.all([
+    const [information, positionsRaw, ordersRaw] = await Promise.all([
       this.metaApi.getAccountInformation(ctx.account),
       this.metaApi.getPositions(ctx.account),
+      this.metaApi.getOrders(ctx.account),
     ]);
     const positions = await this.onlyOwnPositions(userId, positionsRaw);
-    const trades = positions.map((p) => this.mapPosition(p));
-    const floatingProfit = trades.reduce((sum, t) => sum + (t.profit ?? 0), 0);
+    const pending = await this.onlyOwnOrders(userId, ordersRaw);
+    const running = positions.map((p) => this.mapPosition(p));
+    const limits = pending.map((o) => this.mapOrder(o));
+    const trades = [...running, ...limits];
+    const floatingProfit = running.reduce((sum, t) => sum + (t.profit ?? 0), 0);
     const rawAccount = {
         startingBalance: information.balance - floatingProfit,
         currency: information.currency || 'USD',
@@ -794,6 +800,8 @@ export class SoloMt5Service {
         floatingProfit,
         totalProfit: floatingProfit,
         equity: information.equity,
+        margin: Number(information.margin ?? 0),
+        freeMargin: Number(information.freeMargin ?? 0),
       };
     const book = await this.loadAllocatedBook(userId);
     return {
@@ -803,7 +811,7 @@ export class SoloMt5Service {
         ? this.applyAllocatedAccount(rawAccount, book)
         : rawAccount,
       stats: {
-        runningCount: trades.length,
+        runningCount: running.length,
         floatingProfit,
       },
       refreshedAt: new Date().toISOString(),
@@ -1538,6 +1546,10 @@ export class SoloMt5Service {
       isWin: boolean | null;
       submittedAt: string;
       closedAt: string;
+      volume: number;
+      swap: number;
+      commission: number;
+      comment: string | null;
     }> = [];
 
     for (const [positionId, group] of groups) {
@@ -1567,6 +1579,8 @@ export class SoloMt5Service {
         : isSellType(closeDeal.type)
           ? 'BUY'
           : 'SELL';
+      const swap = group.reduce((sum, d) => sum + (d.swap || 0), 0);
+      const commission = group.reduce((sum, d) => sum + (d.commission || 0), 0);
       items.push({
         id: closeDeal.id || positionId,
         signalId: positionId,
@@ -1583,6 +1597,10 @@ export class SoloMt5Service {
         isWin: pnl > 0 ? true : pnl < 0 ? false : null,
         submittedAt: inn.time || closeDeal.time,
         closedAt: closeDeal.time,
+        volume: inn.volume || closeDeal.volume || 0,
+        swap,
+        commission,
+        comment: inn.comment || closeDeal.comment || null,
       });
     }
 
@@ -1695,6 +1713,8 @@ export class SoloMt5Service {
       openPrice: pos.openPrice,
       currentPrice: pos.currentPrice,
       profit: pnl,
+      swap: Number(pos.swap ?? 0),
+      submittedAt: pos.time,
       positionId: pos.id,
       canClose: true,
       canAdjustStops: true,
@@ -1715,8 +1735,10 @@ export class SoloMt5Service {
       stopLoss: order.stopLoss,
       takeProfit: order.takeProfit,
       volume: order.currentVolume ?? order.volume,
+      initialVolume: order.volume,
       openPrice: order.openPrice,
       currentPrice: order.currentPrice,
+      submittedAt: order.time,
       orderId: order.id,
       orderType: order.type,
       canClose: true,
