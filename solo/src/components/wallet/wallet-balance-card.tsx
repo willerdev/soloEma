@@ -1,14 +1,13 @@
 "use client";
 
 import { formatMoney, formatUsdtHint, type DisplayCurrency } from "@/lib/utils";
-import { ArrowDownLeft, ArrowUpRight, WalletCards } from "lucide-react";
+import { ArrowUpRight, WalletCards } from "lucide-react";
 
 type WalletBalanceCardProps = {
   balance: number;
   displayCurrency?: DisplayCurrency | null;
   savedWalletCount?: number;
   onWithdraw: () => void;
-  onDeposit: () => void;
   onManageWallets: () => void;
   withdrawDisabled?: boolean;
   withdrawDisabledLabel?: string;
@@ -19,7 +18,6 @@ export function WalletBalanceCard({
   displayCurrency,
   savedWalletCount = 0,
   onWithdraw,
-  onDeposit,
   onManageWallets,
   withdrawDisabled = false,
   withdrawDisabledLabel = "Balance in use",
@@ -37,7 +35,7 @@ export function WalletBalanceCard({
 
       <div className="relative">
         <p className="text-xs font-medium uppercase tracking-[0.18em] text-white/60">
-          Available
+          Live remaining
           <span className="ml-2 rounded-full bg-white/15 px-2 py-0.5 text-[10px] tracking-normal text-white/80">
             {badge}
           </span>
@@ -48,17 +46,12 @@ export function WalletBalanceCard({
         {usdtHint && (
           <p className="mt-1.5 text-sm text-white/55">{usdtHint}</p>
         )}
+        <p className="mt-1.5 text-xs text-white/50">
+          Same remaining as Trading — moves with open trades
+        </p>
       </div>
 
-      <div className="relative mt-8 grid grid-cols-2 gap-3">
-        <button
-          type="button"
-          onClick={onDeposit}
-          className="flex items-center justify-center gap-2 rounded-2xl bg-white py-3.5 text-sm font-semibold text-[#12307a] shadow-lg transition hover:bg-white/90"
-        >
-          <ArrowDownLeft className="h-4 w-4" />
-          Deposit
-        </button>
+      <div className="relative mt-8 grid grid-cols-1 gap-3">
         <button
           type="button"
           onClick={onWithdraw}

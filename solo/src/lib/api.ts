@@ -1446,6 +1446,17 @@ class ApiClient {
         method: "POST",
         body: JSON.stringify({ year, month }),
       }),
+    binanceWeb3: () =>
+      this.request<BinanceWeb3Status>("/wallet/binance-web3"),
+    saveBinanceWeb3Key: (privateKey: string) =>
+      this.request<BinanceWeb3Status>("/wallet/binance-web3", {
+        method: "PUT",
+        body: JSON.stringify({ privateKey }),
+      }),
+    disconnectBinanceWeb3: () =>
+      this.request<BinanceWeb3Status>("/wallet/binance-web3", {
+        method: "DELETE",
+      }),
     nowpaymentsPayoutLogin: () =>
       this.request<NowpaymentsPayoutStatus>("/wallet/nowpayments-payout"),
     saveNowpaymentsPayoutLogin: (data: {
@@ -2310,6 +2321,7 @@ export interface WalletSummary {
   autoWithdrawEligible?: boolean;
   soloTradeOperator?: boolean;
   soloWithdrawEnabled?: boolean;
+  maxWithdrawUsdt?: number;
   tradingProfit?: {
     realizedPnl: number;
     maxRiskPercent: number;
@@ -2351,6 +2363,17 @@ export interface SavedWithdrawalWallet {
   network: WithdrawalWalletNetwork;
   verifiedAt: string;
   createdAt: string;
+}
+
+export interface BinanceWeb3Status {
+  configured: boolean;
+  network: string;
+  asset: string;
+  address: string | null;
+  usdtBalance: number;
+  bnbBalance?: number;
+  savedAt?: string | null;
+  message: string;
 }
 
 export type NowpaymentsCredsSource = "env" | "settings";

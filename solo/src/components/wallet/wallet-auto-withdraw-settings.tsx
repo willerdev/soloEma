@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { cn, formatCurrency } from "@/lib/utils";
 
-const TRC20_ONLY = ["TRC20"] as const;
+const BEP20_ONLY = ["BEP20"] as const;
 
 export function WalletAutoWithdrawSettings({
   eligible,
@@ -54,7 +54,7 @@ export function WalletAutoWithdrawSettings({
         api.wallet.withdrawalWallets(),
       ]);
       setSettings(s);
-      const trc20 = w.filter((x) => x.network === "TRC20");
+      const trc20 = w.filter((x) => x.network === "BEP20");
       setWallets(trc20);
       setUseFullAvailable(s.useFullAvailable);
       setAmount(s.amount != null ? String(s.amount) : "");
@@ -221,7 +221,7 @@ export function WalletAutoWithdrawSettings({
               Destination wallet
             </h2>
             <p className="mt-1 text-sm text-muted">
-              Pick a verified TRC20 address. soloEmma sends here once a day.
+              Pick a verified BEP20 address. soloEmma sends here once a day.
             </p>
           </div>
           <Button
@@ -247,10 +247,10 @@ export function WalletAutoWithdrawSettings({
               <Wallet className="h-5 w-5" />
             </span>
             <span className="text-sm font-medium text-foreground">
-              Add a TRC20 wallet
+              Add a BEP20 wallet
             </span>
             <span className="text-xs text-muted">
-              Add a TRC20 wallet for daily auto-withdraw.
+              Add a BEP20 wallet for daily auto-withdraw.
             </span>
           </button>
         ) : (
@@ -292,7 +292,7 @@ export function WalletAutoWithdrawSettings({
                           {wallet.label}
                         </span>
                         <span className="block truncate font-mono text-xs text-muted">
-                          TRC20 · {maskWithdrawalWalletAddress(wallet.address)}
+                          BEP20 · {maskWithdrawalWalletAddress(wallet.address)}
                         </span>
                       </span>
                     </button>
@@ -467,7 +467,7 @@ export function WalletAutoWithdrawSettings({
 
       <WalletAddWithdrawalWalletModal
         open={addOpen}
-        networks={TRC20_ONLY}
+        networks={BEP20_ONLY}
         onClose={() => setAddOpen(false)}
         onSaved={() => {
           void load();

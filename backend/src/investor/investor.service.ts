@@ -35,6 +35,7 @@ import {
   resolveInvestorDailyYieldPercent,
 } from './investor-vip.util';
 import { isInvestorVvipActive } from './investor-vvip.util';
+import { YIELD_PAUSE_RESUME_LABEL } from './investor-opt-out.util';
 import { isKampalaWeekend } from '../common/kampala-weekend.util';
 import {
   formatKampalaDateLabel,
@@ -193,6 +194,10 @@ export class InvestorService {
     const config = await this.prisma.platformConfig.findUnique({
       where: { id: 'default' },
     });
+    const yieldMaintenanceUntil = config?.investorMaintenanceUntil ?? null;
+    const yieldMaintenanceActive = Boolean(
+      yieldMaintenanceUntil && yieldMaintenanceUntil.getTime() > Date.now(),
+    );
     const platformDailyYield = Number(config?.investorDailyYieldPercent ?? 8);
     const vipActive = isInvestorVipActive(user);
     const vvipActive = isInvestorVvipActive(user);
@@ -271,6 +276,11 @@ export class InvestorService {
       selfReinvestFeePercent,
       reinvestBlocked,
       reinvestBlockedReason,
+      yieldMaintenance: {
+        paused: yieldMaintenanceActive,
+        until: yieldMaintenanceUntil?.toISOString() ?? null,
+        resumeLabel: YIELD_PAUSE_RESUME_LABEL,
+      },
       minBalancePolicy: await this.resolveMinBalancePolicy(
         Number(financials.investmentBalance ?? 0),
         user.investorSettings?.minBalanceExempt ?? false,
@@ -391,6 +401,15 @@ export class InvestorService {
         active: true,
         enrolledAt: user.investorEnrolledAt?.toISOString() ?? null,
       };
+    }
+    const cooling = await this.prisma.investorOptOut.findFirst({
+      where: { userId, status: 'COOLING' },
+      select: { id: true },
+    });
+    if (cooling) {
+      throw new BadRequestException(
+        'A Smart Invest opt-out is still in progress. You can enroll again after capital is returned.',
+      );
     }
 
     const { deposit, fee, netInvested, feeWaived } =
@@ -846,6 +865,17 @@ export class InvestorService {
     if (!user?.investorActive) {
       throw new BadRequestException('Enroll in the investor program first');
     }
+    if (!paused) {
+      const cooling = await this.prisma.investorOptOut.findFirst({
+        where: { userId, status: 'COOLING' },
+        select: { id: true },
+      });
+      if (cooling) {
+        throw new BadRequestException(
+          'Trading stays paused while Smart Invest opt-out is in progress',
+        );
+      }
+    }
 
     await this.prisma.investorSettings.upsert({
       where: { userId },
@@ -965,6 +995,15 @@ export class InvestorService {
     if (!user) throw new NotFoundException('User not found');
     if (!user.investorActive) {
       throw new BadRequestException('User must be enrolled in the investor program');
+    }
+    const cooling = await this.prisma.investorOptOut.findFirst({
+      where: { userId, status: 'COOLING' },
+      select: { id: true },
+    });
+    if (cooling && !opts?.adminId) {
+      throw new BadRequestException(
+        'Smart Invest opt-out is in progress. Wallet and investment transfers are paused until capital is returned on business day 5.',
+      );
     }
 
     const isAdminMove =
@@ -1302,6 +1341,20 @@ export class InvestorService {
       return { credited: 0, skipped: 'global_pause' as const };
     }
 
+    const maint = await this.prisma.platformConfig.findUnique({
+      where: { id: 'default' },
+      select: { investorMaintenanceUntil: true },
+    });
+    if (
+      maint?.investorMaintenanceUntil &&
+      maint.investorMaintenanceUntil.getTime() > Date.now()
+    ) {
+      this.logger.warn(
+        'Investor daily yield skipped — maintenance window (investorMaintenanceUntil)',
+      );
+      return { credited: 0, skipped: 'maintenance' as const };
+    }
+
     const today = this.kampalaToday();
     const isWeekend = isKampalaWeekend();
     const platformYield = await this.platformInvestorDailyYield();
@@ -1328,6 +1381,14 @@ export class InvestorService {
 
     for (const user of investors) {
       if (user.investorSettings?.yieldPaused) {
+        pausedUsers++;
+        continue;
+      }
+      const cooling = await this.prisma.investorOptOut.findFirst({
+        where: { userId: user.id, status: 'COOLING' },
+        select: { id: true },
+      });
+      if (cooling) {
         pausedUsers++;
         continue;
       }
@@ -1513,6 +1574,14 @@ export class InvestorService {
     const isWeekend = isKampalaWeekend();
     const platformYield = await this.platformInvestorDailyYield();
     const globalYieldPaused = await this.isGlobalInvestorYieldPaused();
+    const maint = await this.prisma.platformConfig.findUnique({
+      where: { id: 'default' },
+      select: { investorMaintenanceUntil: true },
+    });
+    const maintenancePaused = Boolean(
+      maint?.investorMaintenanceUntil &&
+        maint.investorMaintenanceUntil.getTime() > Date.now(),
+    );
 
     const investors = await this.prisma.user.findMany({
       where: { investorActive: true },
@@ -1584,7 +1653,9 @@ export class InvestorService {
         earningDays,
         isWeekend,
         yieldPaused: Boolean(
-          globalYieldPaused || user.investorSettings?.yieldPaused,
+          globalYieldPaused ||
+            maintenancePaused ||
+            user.investorSettings?.yieldPaused,
         ),
         vipActive: isInvestorVipActive(user),
         yieldDeliveryWindow: investorYieldDeliveryWindowLabel(),

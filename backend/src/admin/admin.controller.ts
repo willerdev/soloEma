@@ -744,6 +744,13 @@ export class AdminController {
     );
   }
 
+  @Get('investors/opt-outs')
+  listInvestorOptOuts(@Query('limit') limit?: string) {
+    return this.adminService.listInvestorOptOuts(
+      limit ? Number(limit) : 50,
+    );
+  }
+
   @Get('unitrust')
   listUnitrust(@Query('limit') limit?: string) {
     return this.unitrust.listMembers(limit ? Number(limit) : 50);
@@ -1007,6 +1014,43 @@ export class AdminController {
     },
   ) {
     return this.adminService.creditUserWallet(req.user.id, body);
+  }
+
+  @Get('wallet/reserve')
+  listReserveWallets() {
+    return this.wallet.listReserveWallets();
+  }
+
+  @Post('wallet/reserve/seed')
+  seedWithdrawalReserves() {
+    return this.wallet.seedWithdrawalReserves();
+  }
+
+  @Post('wallet/reserve/sweep-available')
+  sweepAvailableToReserve() {
+    return this.wallet.sweepAvailableToReserve();
+  }
+
+  @Post('wallet/reserve/release')
+  releaseReserve(
+    @Request() req: { user: { id: string } },
+    @Body()
+    body: {
+      userId?: string;
+      email?: string;
+      amount: number;
+      description?: string;
+    },
+  ) {
+    return this.adminService.releaseUserReserve(req.user.id, body);
+  }
+
+  @Post('wallet/reserve/release-percent')
+  releaseReservePercent(
+    @Request() req: { user: { id: string } },
+    @Body() body: { percent: number },
+  ) {
+    return this.wallet.releaseReservePercent(body.percent, req.user.id);
   }
 
   @Post('notifications/yield-hold-policy')

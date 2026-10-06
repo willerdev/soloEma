@@ -47,6 +47,7 @@ import {
 } from '../common/broker-error.util';
 import { normalizeDerivSymbol } from '../ai/deriv-symbols';
 import { isAfterSoloMt5HistoryReset } from '../common/solo-mt5-history-since';
+import { isSoloApp } from '../common/app-variant';
 import { computeOneToOnePrice } from '../common/rr.util';
 import {
   defaultMt5ChartSlPips,
@@ -214,10 +215,60 @@ export class SoloMt5Service {
     return isSoloAllocatedTraderEmail(user?.email);
   }
 
+  private async settledWalletBalance(userId: string): Promise<number> {
+    const wallet = await this.prisma.platformWallet.findUnique({
+      where: { userId },
+      select: { availableBalance: true },
+    });
+    return roundAllocatedUsdt(Number(wallet?.availableBalance ?? 0));
+  }
+
+  private async liveOwnFloatingProfit(userId: string): Promise<number | null> {
+    if (!this.metaApi.isConfigured) return null;
+    try {
+      return await this.withCloud(userId, async () => {
+        const ctx = await this.readyAccountOrNull(userId);
+        if (!ctx) return null;
+        const positionsRaw = await this.metaApi.getPositions(ctx.account);
+        const positions = await this.onlyOwnPositions(userId, positionsRaw);
+        const floating = positions.reduce(
+          (sum, p) => sum + Number(p.unrealizedProfit || p.profit || 0),
+          0,
+        );
+        return roundAllocatedUsdt(floating);
+      });
+    } catch {
+      return null;
+    }
+  }
+
   /**
-   * Emma’s wallet: (deposits + profits) − $200 trading capital − MetaAPI capital.
-   * Shared admin MetaAPI books only subtract the $200 lock, not the full broker equity.
+   * Remaining funds: settled wallet ± open P&L on this user's visible trades.
    */
+  private tradingDisplayAccount(
+    currency: string,
+    settled: number,
+    floatingProfit: number,
+  ): {
+    startingBalance: number;
+    currency: string;
+    realizedProfit: number;
+    floatingProfit: number;
+    totalProfit: number;
+    equity: number;
+  } {
+    const settledR = roundAllocatedUsdt(Math.max(0, settled));
+    const floating = roundAllocatedUsdt(floatingProfit);
+    return {
+      startingBalance: settledR,
+      currency: currency || 'USD',
+      realizedProfit: 0,
+      floatingProfit: floating,
+      totalProfit: floating,
+      equity: roundAllocatedUsdt(Math.max(0, settledR + floating)),
+    };
+  }
+
   async allocatedBook(userId: string): Promise<{
     deposit: number;
     liveTradingBalance: number;
@@ -239,9 +290,12 @@ export class SoloMt5Service {
     userId: string,
     ledgerAvailable: number,
   ): Promise<number | null> {
-    if (!(await this.isAllocatedTrader(userId))) return null;
-    // Show the Soloema ledger. Deriv/MetaAPI capital is not deducted from wallet.
-    return roundAllocatedUsdt(Math.max(0, ledgerAvailable));
+    if (!isSoloApp()) return null;
+    const floating = await this.liveOwnFloatingProfit(userId);
+    if (floating == null) {
+      return roundAllocatedUsdt(Math.max(0, ledgerAvailable));
+    }
+    return roundAllocatedUsdt(Math.max(0, ledgerAvailable + floating));
   }
 
   private async loadAllocatedBook(userId: string) {
@@ -274,10 +328,11 @@ export class SoloMt5Service {
     try {
       const ctx = await this.readyAccountOrNull(userId);
       if (ctx) {
-        const [information, positions] = await Promise.all([
+        const [information, positionsRaw] = await Promise.all([
           this.metaApi.getAccountInformation(ctx.account),
           this.metaApi.getPositions(ctx.account),
         ]);
+        const positions = await this.onlyOwnPositions(userId, positionsRaw);
         mt5Balance = Number(information.balance ?? 0);
         mt5Equity = Number(information.equity ?? mt5Balance);
         currency = information.currency || 'USD';
@@ -309,23 +364,18 @@ export class SoloMt5Service {
         : 'deriv'
       : 'pnl';
 
-    const remaining = computeAllocatedWallet({
-      deposits,
-      profits,
-      withdrawn,
-      tradingCapitalLock,
-      metaApiCapital,
-    });
+    const settled = await this.settledWalletBalance(userId);
+    const remaining = roundAllocatedUsdt(Math.max(0, settled + floating));
 
     return {
       deposit: deposits,
-      liveTradingBalance: roundAllocatedUsdt(tradingCapitalLock + metaApiCapital),
+      liveTradingBalance: settled,
       profitsMade: profits,
       remaining,
       dedicatedLive,
       source,
       currency,
-      tradingEquity: roundAllocatedUsdt(tradingCapitalLock + floating),
+      tradingEquity: remaining,
       withdrawn,
       metaApiCapital,
       tradingCapitalLock,
@@ -548,21 +598,17 @@ export class SoloMt5Service {
       const limits = orders.map((o) => this.mapOrder(o));
       const trades = [...running, ...limits];
       const floatingProfit = running.reduce((sum, t) => sum + (t.profit ?? 0), 0);
-      const startingBalance = information.balance - floatingProfit;
-      const rawAccount = {
-          startingBalance,
-          currency: information.currency || 'USD',
-          realizedProfit: 0,
+      const settled = await this.settledWalletBalance(userId);
+      const displayAccount = {
+        ...this.tradingDisplayAccount(
+          information.currency || 'USD',
+          settled,
           floatingProfit,
-          totalProfit: floatingProfit,
-          equity: information.equity,
-          margin: Number(information.margin ?? 0),
-          freeMargin: Number(information.freeMargin ?? 0),
-        };
+        ),
+        margin: Number(information.margin ?? 0),
+        freeMargin: Number(information.freeMargin ?? 0),
+      };
       const book = await this.loadAllocatedBook(userId);
-      const displayAccount = book
-        ? this.applyAllocatedAccount(rawAccount, book)
-        : rawAccount;
 
       return {
         configured: true,
@@ -797,23 +843,16 @@ export class SoloMt5Service {
     const limits = pending.map((o) => this.mapOrder(o));
     const trades = [...running, ...limits];
     const floatingProfit = running.reduce((sum, t) => sum + (t.profit ?? 0), 0);
-    const rawAccount = {
-        startingBalance: information.balance - floatingProfit,
-        currency: information.currency || 'USD',
-        realizedProfit: 0,
-        floatingProfit,
-        totalProfit: floatingProfit,
-        equity: information.equity,
-        margin: Number(information.margin ?? 0),
-        freeMargin: Number(information.freeMargin ?? 0),
-      };
+    const settled = await this.settledWalletBalance(userId);
     const book = await this.loadAllocatedBook(userId);
     return {
       trades,
       accountSource: 'linked_live' as const,
-      account: book
-        ? this.applyAllocatedAccount(rawAccount, book)
-        : rawAccount,
+      account: this.tradingDisplayAccount(
+        information.currency || 'USD',
+        settled,
+        floatingProfit,
+      ),
       stats: {
         runningCount: running.length,
         floatingProfit,
